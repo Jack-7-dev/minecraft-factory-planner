@@ -9,7 +9,7 @@ and the Star-Technology modpack.
 
 ## What it does
 
-- **Build a factory chain** Every ingredient on a line is clickable: click it and choose the
+- **Build a factory chain.** Every ingredient on a line is clickable: click it and choose the
   recipe that you want. This is the default, because automatic selection is good on material chains
   and less reliable above them.
 - **Or automatically plan a chain from a target.** Pick an item, state a rate, get the lines that make
