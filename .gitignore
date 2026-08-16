@@ -1,0 +1,31 @@
+# Markdown. The working notes - the plan, the status log, the agent instructions - stay local, so
+# this is an allowlist rather than a list of exclusions: a new document is private until it is named
+# here, which is the safe direction for a public repository.
+*.md
+!README.md
+!LICENSE.md
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# ModDevGradle / dev runs
+run/
+runs/
+forge/run/
+forge/runs/
+repo/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.eclipse/
+.settings/
+.classpath
+.project
+bin/
+out/

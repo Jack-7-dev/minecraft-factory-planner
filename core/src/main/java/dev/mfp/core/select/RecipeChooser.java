@@ -1,0 +1,1677 @@
+package dev.mfp.core.select;
+
+import dev.mfp.core.index.RecipeIndex;
+import dev.mfp.core.model.MaterialForm;
+import dev.mfp.core.model.MaterialForms;
+import dev.mfp.core.model.MfpIngredient;
+import dev.mfp.core.model.MfpKey;
+import dev.mfp.core.model.MfpMachine;
+import dev.mfp.core.model.MfpOutput;
+import dev.mfp.core.model.MfpRecipe;
+import dev.mfp.core.plan.Line;
+import dev.mfp.core.plan.MachineConfig;
+import dev.mfp.core.plan.Plan;
+import dev.mfp.core.plan.Preferences;
+import dev.mfp.core.plan.RawMaterials;
+import dev.mfp.core.plan.SolverMode;
+import dev.mfp.core.plan.TargetOutput;
+import dev.mfp.core.solver.SolveResult;
+import dev.mfp.core.solver.Solvers;
+import dev.mfp.core.solver.ThroughputResolver;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Turns "make 5 casings a second" into a set of lines the solver can run.
+ *
+ * <p>Two responsibilities that are easy to conflate and must not be:
+ *
+ * <ol>
+ *   <li><b>Choosing recipes</b>, which {@link RecipeScorer} ranks and the user may override.
+ *   <li><b>Ordering lines</b>, which is not presentation. The sequential engine walks a floor once
+ *       carrying demand downward, so a line can only be fed by lines below it. Lines emitted in the
+ *       wrong order make a perfectly acyclic plan report imports for things it actually produces —
+ *       the same symptom a genuine loop produces. Emitting in topological order removes that whole
+ *       class of false alarm.
+ * </ol>
+ *
+ * <p>Cycles are <em>observed</em>, not inferred. The walk keeps the current recipe path, so
+ * re-entering a recipe already on it is a loop by definition. That is what
+ * {@link ChooserResult#requiresMatrixSolver()} is set from, rather than from the solver's warning,
+ * so a chooser bug can never be mistaken for a modelling limitation.
+ */
+public final class RecipeChooser {
+
+    /** How deep expansion may go before giving up. GregTech chains are deep but not unbounded. */
+    private static final int MAX_DEPTH = 64;
+
+    /** How many times to retry around a loop before accepting that the loop is real. */
+    private static final int MAX_CYCLE_RETRIES = 6;
+
+    /**
+     * How many rounds the blacklist's consequences are followed before the plan is accepted as it is.
+     *
+     * <p>Each round makes one more layer of items unavailable, so this is the depth of chain a
+     * blacklisted item can poison: inferium to air essence to wood essence to oak log is three. Six
+     * is generous for the shape these have in practice and keeps a pathological graph bounded.
+     */
+    private static final int MAX_BLOCK_ROUNDS = 6;
+
+    /**
+     * How many times to re-expand offering the previous plan's leftovers (M11.1).
+     *
+     * <p>Small on purpose. The spare set only accumulates, so this terminates on its own; the cap is
+     * there because each round is a full walk of the graph, and a plan that has not settled after
+     * four of them is not going to.
+     */
+    private static final int MAX_BYPRODUCT_ROUNDS = 4;
+
+    /** Above this many lines a candidate is costed by the single pass rather than the simplex. */
+    private static final int PROBE_LINE_LIMIT = 250;
+
+    /**
+     * Above this many lines the byproduct pass takes one round with one relaxation, not four with two.
+     *
+     * <p>Each round is two full walks of the graph and the walks are what cost. On the pack's worst
+     * plan — a tungsten chain of fifteen hundred lines that is already reported as UNKNOWN — the full
+     * pass took the expansion from five seconds to eleven, and eleven seconds in a GUI reads as a
+     * hang. A plan that size is beyond the pass's help anyway: it is not one factory, it is the
+     * chooser having failed to find one.
+     */
+    private static final int LARGE_PLAN_LINES = 400;
+
+    /**
+     * How far downstream of an item to look when testing whether a recipe merely undoes it.
+     *
+     * <p>Two levels, because GregTech's conversion loops are typically four recipes long and each
+     * level of this search covers two of them: ingot to nugget, then nugget to magnetic nugget.
+     * One level misses them entirely; three starts sweeping in legitimate inputs.
+     */
+    private static final int DOWNSTREAM_DEPTH = 2;
+
+    /**
+     * Consumers examined per item.
+     *
+     * <p>Generous, because the cap is not a performance nicety but a correctness trade: a common
+     * intermediate such as an aluminium ingot has hundreds of consumers, and truncating too early
+     * hides the very recipes that reveal a conversion loop. The search is cached per item and runs
+     * once per plan, so this costs little.
+     */
+    private static final int DOWNSTREAM_CONSUMER_LIMIT = 512;
+
+    /** Hard ceiling on the downstream set, so one pathological item cannot stall a plan. */
+    private static final int DOWNSTREAM_KEY_LIMIT = 4096;
+
+    private final RecipeIndex index;
+    private final Preferences preferences;
+    private final Map<MfpKey, Set<MfpKey>> downstreamCache = new LinkedHashMap<>();
+    private final Map<String, Integer> buildCostCache = new LinkedHashMap<>();
+    private Set<MfpKey> producedIgnoringVariant;
+
+    /**
+     * The raw set of the plan being worked on, for the scorer's terminal-recipe term.
+     *
+     * <p>Held here rather than passed through {@code RecipeScorer.score} because the oracle is
+     * exactly the seam for "questions the scorer cannot answer from a recipe alone", and this is
+     * one. Set at every public entry point, so it can never be a leftover from a previous plan.
+     */
+    private Set<MfpKey> rawMaterials = Set.of();
+
+    /**
+     * Items the previous expansion left over, for the byproduct-feeding pass (M11.1).
+     *
+     * <p>Empty during the first walk by definition — the plan does not exist yet, so nothing is
+     * spare — and that is exactly why this had to be a second pass rather than something the scorer
+     * could work out on its own.
+     */
+    private Set<MfpKey> spareByproducts = Set.of();
+
+    /** Whether this walk is a byproduct-feeding round, and so may reuse a line already chosen. */
+    private boolean feedingRound;
+
+    /**
+     * Whether this walk also stops counting a spare input as evidence that a recipe is reversible.
+     *
+     * <p>Separate from {@link #feedingRound} because the two relaxations do not help the same plans,
+     * and one knob turning on both meant a plan that wanted one had to pay for the other. Each round
+     * walks the graph under both settings and keeps whichever came out better; see
+     * {@link #feedByproducts}.
+     */
+    private boolean spareIsNotAReversal;
+
+    private ThroughputResolver resolver = ThroughputResolver.BASE;
+
+    /** Answers the scorer's index-dependent questions, sharing this chooser's caches. */
+    private final RecipeScorer.Oracle oracle = new RecipeScorer.Oracle() {
+
+        @Override
+        public boolean isReversible(MfpRecipe recipe, MfpKey producedKey) {
+            return RecipeChooser.this.isReversible(recipe, producedKey);
+        }
+
+        @Override
+        public boolean isRecycling(MfpRecipe recipe) {
+            return RecipeChooser.this.isRecycling(recipe);
+        }
+
+        @Override
+        public MaterialForm form(MfpKey key) {
+            return index.form(key);
+        }
+
+        @Override
+        public int buildCost(MfpRecipe recipe) {
+            return RecipeChooser.this.buildCost(recipe.recipeTypeId());
+        }
+
+        @Override
+        public boolean isRaw(MfpKey key) {
+            return rawMaterials.contains(key);
+        }
+
+        @Override
+        public boolean isSpareByproduct(MfpKey key) {
+            return spareByproducts.contains(key);
+        }
+    };
+
+    public RecipeChooser(RecipeIndex index) {
+        this(index, Preferences.none());
+    }
+
+    /**
+     * @param preferences the player's standing defaults, which every plan may overrule (M8)
+     */
+    public RecipeChooser(RecipeIndex index, Preferences preferences) {
+        this.index = index;
+        this.preferences = preferences == null ? Preferences.none() : preferences;
+    }
+
+    /**
+     * The rates to cost a candidate plan with, when deciding whether a byproduct feed was worth it.
+     *
+     * <p>Worth passing whenever the caller has one. The comparison in {@link #feedByproducts} is
+     * between two plans rather than against an absolute, so the base resolver ranks them the same way
+     * most of the time — but overclocking is exactly the thing that makes one route cheaper than
+     * another in GregTech, and a caller that already built a behaviour-aware resolver should not have
+     * the chooser guessing without it.
+     */
+    public RecipeChooser withResolver(ThroughputResolver newResolver) {
+        this.resolver = newResolver == null ? ThroughputResolver.BASE : newResolver;
+        return this;
+    }
+
+    /**
+     * Whether a recipe is recycling a used item rather than producing its output.
+     *
+     * <p>The tell is an input pinned to a specific NBT variant that no recipe produces, while some
+     * other form of the same item is made routinely. That is the shape of GregTech's generated tool
+     * recycling: arc-furnacing a worn buzzsaw wants a particular damage value, and nothing makes a
+     * buzzsaw in that state, so the plan bottoms out importing the tool — which is not a way to
+     * obtain aluminium.
+     *
+     * <p>Note what this deliberately does not say: "an unproducible input is bad". Raw ore is
+     * unproducible too, and smelting ore is the route we most want — but no form of raw ore is
+     * produced by anything, so it is not caught here. The rule fires only on the mismatch between an
+     * item being manufactured and this particular state of it being unobtainable.
+     *
+     * <p>It is deliberately narrow. A broader version that dropped the variant requirement caught
+     * more junk but pushed selection towards <em>other</em> recycling recipes whose inputs are
+     * producible, expanding a two-line plan into eighty. Recipe selection on this graph is not
+     * solved by one more rule; see STATUS for what would actually be needed.
+     */
+    private boolean isRecycling(MfpRecipe recipe) {
+        for (MfpIngredient input : recipe.inputs()) {
+            if (!input.consumed() || input.effectiveAmount() <= 0) {
+                continue;
+            }
+            MfpKey key = input.primary();
+            if (key.variant() == null || !index.producing(key).isEmpty()) {
+                continue;
+            }
+            if (producedIgnoringVariant().contains(key.withoutVariant())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The tier of the cheapest machine that runs {@code recipeTypeId}, judged by how it is made.
+     *
+     * <p>A machine is an item like any other, so the index already knows what it takes to obtain
+     * one: the recipe that produces it, and that recipe's tier. A greenhouse is assembled at LV; the
+     * multiblock controller that does the same job later in the game comes off the assembly line at
+     * ZPM. Nothing here is named, and nothing is hardcoded — a pack that adds a cheaper machine for
+     * an existing recipe type is preferred automatically, which is the behaviour a pack author would
+     * expect from adding one.
+     *
+     * <p>The minimum across the machines, because {@link MachinePicker} will pick the cheapest of
+     * them anyway; scoring the recipe by a machine the plan would not use would be scoring a build
+     * nobody is going to make.
+     *
+     * <p>Unknown when no recipe makes any of the machines. That is the honest answer for hand
+     * crafting, for a machine given out by a quest, and for one the pack removed the recipe for, and
+     * it produces no term at all rather than a guess in either direction.
+     */
+    private int buildCost(String recipeTypeId) {
+        Integer cached = buildCostCache.get(recipeTypeId);
+        if (cached != null) {
+            return cached;
+        }
+
+        int cheapest = RecipeScorer.UNKNOWN_BUILD_COST;
+        for (MfpMachine machine : index.machinesFor(recipeTypeId)) {
+            int cost = MachinePicker.buildCost(index, machine);
+            if (cost != RecipeScorer.UNKNOWN_BUILD_COST
+                    && (cheapest == RecipeScorer.UNKNOWN_BUILD_COST || cost < cheapest)) {
+                cheapest = cost;
+            }
+        }
+        buildCostCache.put(recipeTypeId, cheapest);
+        return cheapest;
+    }
+
+    /** Whether this item is an ore in some form — crushed, geode, raw or a plain ore block. */
+    private boolean isOreForm(MfpKey key) {
+        return MaterialForms.oreSourceRank(index.form(key)) != MaterialForms.NOT_AN_ORE_SOURCE;
+    }
+
+    /** Every item some recipe produces, with NBT variants collapsed. Built once, lazily. */
+    private Set<MfpKey> producedIgnoringVariant() {
+        if (producedIgnoringVariant == null) {
+            Set<MfpKey> produced = new LinkedHashSet<>();
+            for (MfpRecipe recipe : index.all()) {
+                for (MfpOutput output : recipe.outputs()) {
+                    produced.add(output.key().withoutVariant());
+                }
+            }
+            producedIgnoringVariant = produced;
+        }
+        return producedIgnoringVariant;
+    }
+
+    /**
+     * Whether {@code recipe} merely undoes the thing it is supposed to produce.
+     *
+     * <p>True when one of its inputs is itself made, directly or nearly so, <em>from</em> that
+     * output. Nine steel nuggets make a steel ingot; a steel ingot makes nine steel nuggets. The
+     * pair is a unit conversion rather than a way of obtaining steel, and following it leads into a
+     * loop — which is why this outweighs every other term in the scorer.
+     *
+     * <p>Structural rather than name-based, deliberately: a pack can name its items anything, and a
+     * rule that keyed off {@code _nugget} would work on GregTech and nowhere else.
+     */
+    private boolean isReversible(MfpRecipe recipe, MfpKey producedKey) {
+        Set<MfpKey> downstream = downstreamOf(producedKey);
+        if (downstream.isEmpty()) {
+            return false;
+        }
+        for (MfpIngredient input : recipe.inputs()) {
+            if (!input.consumed() || input.effectiveAmount() <= 0) {
+                continue;
+            }
+            if (spareIsNotAReversal && spareByproducts.contains(input.primary())) {
+                // An input the plan is already throwing away cannot be the reason this recipe is
+                // undoing something (M11.1). Reversibility exists to catch packaging pairs - nugget
+                // to ingot and back - where the two recipes cancel; here the plan has a surplus of
+                // the item and consuming it is the whole point. Without this exception the rule
+                // fires on exactly the shape M11.1 hunts for: the greenhouse turns carbon dioxide
+                // into oxygen, so *any* recipe making carbon dioxide out of oxygen looks like its
+                // reverse, and the -60 kept the pack's own tree loop 56 points below a five-line
+                // beetroot chain that threw the oxygen away.
+                continue;
+            }
+            if (downstream.contains(input.primary())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Everything reachable by consuming {@code key} and then consuming what that produced.
+     *
+     * <p>Computed once per item and cached, rather than per candidate: an item with four hundred
+     * ways to make it would otherwise repeat the same search four hundred times.
+     */
+    private Set<MfpKey> downstreamOf(MfpKey key) {
+        Set<MfpKey> cached = downstreamCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+
+        Set<MfpKey> reached = new LinkedHashSet<>();
+        Set<MfpKey> frontier = new LinkedHashSet<>(Set.of(key));
+        for (int depth = 0; depth < DOWNSTREAM_DEPTH && !frontier.isEmpty(); depth++) {
+            Set<MfpKey> next = new LinkedHashSet<>();
+            for (MfpKey from : frontier) {
+                int scanned = 0;
+                for (MfpRecipe consumer : index.consuming(from)) {
+                    if (scanned++ >= DOWNSTREAM_CONSUMER_LIMIT || reached.size() >= DOWNSTREAM_KEY_LIMIT) {
+                        break;
+                    }
+                    if (!consumer.consumes(from)) {
+                        // consuming() also answers "is used here", which includes catalysts and
+                        // programmed circuits. Those do not make the recipe a conversion.
+                        continue;
+                    }
+                    for (MfpOutput output : consumer.outputs()) {
+                        if (!output.key().equals(key) && reached.add(output.key())) {
+                            next.add(output.key());
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+
+        downstreamCache.put(key, reached);
+        return reached;
+    }
+
+    /**
+     * Expand a plan's targets into lines and install them on its root floor.
+     *
+     * <p>The plan is left ready to solve: lines ordered, machines chosen, and the solver mode moved
+     * to {@link SolverMode#MATRIX} if a loop was found and the plan was on {@link SolverMode#AUTO}.
+     */
+    public ChooserResult expandInto(Plan plan) {
+        ChooserResult result = expand(plan);
+        result.lines().forEach(plan::add);
+        if (plan.solverMode() == SolverMode.AUTO && needsMatrix(plan, result)) {
+            // Derived, not chosen: a later expansion that finds no loop must be free to go back to
+            // AUTO, or "needs the matrix engine" degrades into "once needed it".
+            plan.deriveSolverMode(SolverMode.MATRIX);
+        }
+        return result;
+    }
+
+    /**
+     * Whether this plan is beyond what one top-down pass can answer.
+     *
+     * <p>Two shapes qualify, and only one of them was being detected. A <b>loop</b> is the obvious
+     * one. The other is a <b>byproduct one line makes and another line eats</b>: the sequential
+     * engine carries demand downwards in a single pass, so it can only feed a line from below, and a
+     * byproduct whose consumer was already solved is left as an import of something the plan
+     * demonstrably produces. That is a correct report of a real limitation and a poor answer to the
+     * question, and it forced the user to reach for the matrix engine by hand on every chain with a
+     * shared byproduct.
+     *
+     * <p>Not simply "always use the matrix engine", because it is not strictly better. It cannot
+     * honour a machine limit or a line percentage (§5b.6) — it reports them as ignored — and it needs
+     * the plan to describe exactly one factory, so two lines making the same item leave it with no
+     * unique answer at all. Where the user has set a limit, the engine that honours it is the right
+     * one, and that is what the last clause here protects.
+     */
+    private static boolean needsMatrix(Plan plan, ChooserResult result) {
+        if (result.requiresMatrixSolver()) {
+            return true;
+        }
+        return sharesAByproduct(result.lines()) && !usesMachineLimits(plan);
+    }
+
+    /** Whether some line eats a byproduct of another, which a single downward pass may not reach. */
+    private static boolean sharesAByproduct(List<Line> lines) {
+        for (Line producer : lines) {
+            if (producer.recipe().outputs().size() < 2) {
+                // With one output there is no byproduct: the line was chosen to make that item, and
+                // whoever wanted it is the reason the line exists.
+                continue;
+            }
+            for (MfpOutput output : producer.recipe().outputs()) {
+                for (Line consumer : lines) {
+                    if (consumer != producer && consumer.recipe().consumes(output.key())) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean usesMachineLimits(Plan plan) {
+        return plan.machineConfigs().values().stream().anyMatch(MachineConfig::hasLimit)
+                || plan.allLines().stream().anyMatch(line -> line.machine() != null
+                        && line.machine().hasLimit());
+    }
+
+    /**
+     * Expand without touching the plan, so callers can review before committing.
+     *
+     * <p>When the first attempt closes a loop, the chooser tries again while steering around the
+     * recipe that closed it. This matters more than it sounds: GregTech is full of reversible
+     * "packaging" recipes — nugget to ingot, ingot to block, polarise and unpolarise — and the
+     * scorer will happily pick one, producing a loop where a perfectly ordinary production route
+     * existed. Steering around it is not the same as pretending loops do not exist: if no acyclic
+     * plan can be found, the original result is returned with its loop intact, because that loop is
+     * real and is what the matrix engine is for.
+     */
+    public ChooserResult expand(Plan plan) {
+        rawMaterials = plan.rawMaterials();
+        spareByproducts = Set.of();
+        try {
+            if (!plan.autoResolve()) {
+                // Hand-built (M11.3): one walk, and nothing in it is the chooser's opinion except
+                // the target's own recipe. Both of the passes below exist to second-guess the
+                // scorer's picks — steering around a loop it wandered into, and re-picking to eat a
+                // leftover — and there are no picks to second-guess. Running them anyway would move
+                // the one line the user did not choose and leave the plan's shape depending on
+                // which imports happened to be answered, which is precisely the unpredictability
+                // this mode exists to escape.
+                return expandAvoiding(plan, Set.of());
+            }
+            ChooserResult best = expandSteeringAroundPackagingLoops(plan);
+            if (!plan.byproductFeeds()) {
+                return best;
+            }
+            return feedByproducts(plan, best);
+        } finally {
+            spareByproducts = Set.of();
+        }
+    }
+
+    /**
+     * Expand again, knowing what the last attempt threw away (M11.1).
+     *
+     * <p>Star-Technology deliberately builds chains that feed each other — growing a tree gives off
+     * the oxygen that burning charcoal needs to make the carbon dioxide the tree wants — and until
+     * now MFP found those only by accident, when the walk happened to re-enter a recipe already on
+     * its own path (STATUS §6d.28). An ancestor is visible to a depth-first walk; <b>a byproduct from
+     * a sibling branch is not</b>, and that is the common case.
+     *
+     * <p>So the walk runs again with the previous plan's leftovers in hand, and the scorer prefers a
+     * candidate that eats one. Iterated to a fixed point, which in practice is two or three rounds:
+     * the set of spare items only ever accumulates, so it terminates.
+     *
+     * <p><b>A round is kept only if it is strictly better and no worse.</b> Fewer lines or fewer
+     * imports, and never more imports. That is what makes this safe to have on by default: the pass
+     * cannot talk a plan into a worse shape, only out of a chain it did not need. It is also what
+     * stops the obvious oscillation — a round that consumes the oxygen makes the oxygen no longer
+     * spare, and re-expanding on that would simply rebuild the plan it started from.
+     */
+    private ChooserResult feedByproducts(Plan plan, ChooserResult first) {
+        ChooserResult best = first;
+        Set<MfpKey> tried = new LinkedHashSet<>();
+        List<MfpKey> fed = new ArrayList<>();
+        boolean large = first.lines().size() > LARGE_PLAN_LINES;
+        int rounds = large ? 1 : MAX_BYPRODUCT_ROUNDS;
+        for (int round = 0; round < rounds; round++) {
+            Set<MfpKey> spare = spareOutputs(best, plan);
+            if (spare.isEmpty() || !tried.addAll(spare)) {
+                break;      // nothing left over, or nothing left over that has not been offered
+            }
+            spareByproducts = spare;
+
+            // Both relaxations, separately, because they do not help the same plans. Offering the
+            // leftovers alone is enough for a polyethylene chain and does nothing for the pack's tree
+            // loop; also excusing the reversibility penalty finds the tree loop and, on its own,
+            // talks the polyethylene chain into four extra lines of chemistry it does not need. One
+            // walk each and keep the better answer is both cheaper and more honest than trying to
+            // predict which a plan wants.
+            ChooserResult offered = walk(plan, false);
+            ChooserResult andNotAReversal = large ? offered : walk(plan, true);
+            ChooserResult chosen = better(plan, best, offered, andNotAReversal);
+            if (chosen == null) {
+                break;
+            }
+            for (MfpKey key : spare) {
+                if (consumedBy(chosen, key) && !consumedBy(best, key) && !fed.contains(key)) {
+                    fed.add(key);
+                }
+            }
+            best = chosen;
+        }
+        return fed.isEmpty() ? best : best.withByproductFeeds(List.copyOf(fed));
+    }
+
+    private ChooserResult walk(Plan plan, boolean exemptReversals) {
+        feedingRound = true;
+        spareIsNotAReversal = exemptReversals;
+        try {
+            return expandSteeringAroundPackagingLoops(plan);
+        } finally {
+            feedingRound = false;
+            spareIsNotAReversal = false;
+        }
+    }
+
+    /**
+     * The better of two candidates, or null when neither is worth keeping.
+     *
+     * <p>Ranked on what the user would rank them on, in the order they would: a plan that stops
+     * importing something the pack cannot make beats one that merely got cheaper, and a cheaper plan
+     * beats a shorter one. Only candidates that eat something spare and pass {@link #isNoWorse} are
+     * considered at all, so this is choosing between improvements rather than picking a least-worst.
+     */
+    private ChooserResult better(Plan plan, ChooserResult best, ChooserResult a, ChooserResult b) {
+        // Every gate is applied to each candidate on its own before they are ranked against each
+        // other. Ranking first and gating the winner loses a good plan to a better-looking one that
+        // turns out to be too expensive - which is exactly what happened to the polyethylene chain,
+        // where the cheaper nine-line answer was discarded because a fourteen-line one imported one
+        // fewer thing and then failed on cost.
+        List<ChooserResult> viable = new ArrayList<>(2);
+        for (ChooserResult candidate : List.of(a, b)) {
+            if (eats(best, candidate) && isNoWorse(plan, best, candidate)
+                    && !costsMore(plan, best, candidate)) {
+                viable.add(candidate);
+            }
+        }
+        if (viable.isEmpty()) {
+            return null;
+        }
+        if (viable.size() == 1) {
+            return viable.get(0);
+        }
+        return rank(plan, viable.get(0), viable.get(1)) <= 0 ? viable.get(0) : viable.get(1);
+    }
+
+    /** Whether a candidate consumes something the previous plan was throwing away. */
+    private boolean eats(ChooserResult best, ChooserResult candidate) {
+        for (MfpKey key : spareByproducts) {
+            if (consumedBy(candidate, key) && !consumedBy(best, key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Negative when {@code a} is the better plan. Imports, then energy, then size. */
+    private int rank(Plan plan, ChooserResult a, ChooserResult b) {
+        if (a.unresolved().size() != b.unresolved().size()) {
+            return Integer.compare(a.unresolved().size(), b.unresolved().size());
+        }
+        SolveResult solvedA = probe(plan, a, probeEngine(a, b));
+        SolveResult solvedB = probe(plan, b, probeEngine(a, b));
+        if (solvedA != null && solvedB != null
+                && Math.abs(solvedA.euDrawPerSecond() - solvedB.euDrawPerSecond()) > 1e-6) {
+            return Double.compare(solvedA.euDrawPerSecond(), solvedB.euDrawPerSecond());
+        }
+        return Integer.compare(a.lines().size(), b.lines().size());
+    }
+
+    /**
+     * Whether a re-expansion may be kept: it must have cost the plan nothing.
+     *
+     * <p>The reason to keep a round is decided separately and it is concrete — some item the plan was
+     * throwing away is now being eaten by a line that wanted it. This method is the other half: the
+     * feed must not have been bought with a bigger plan or a longer shopping list.
+     *
+     * <p>Deliberately not "the scorer liked it more". The pass is on by default, so its acceptance
+     * test is the only thing standing between a plan the user asked for and a plan the chooser talked
+     * itself into, and both halves of the test are things the user can see for themselves. The bound
+     * on how far the pick can move is the scorer's own: {@code BYPRODUCT_BONUS} is small enough that
+     * a recipe has to have been close to winning already.
+     */
+    private static boolean isNoWorse(Plan plan, ChooserResult best, ChooserResult retry) {
+        if (retry.lines().isEmpty() || !stillMakesTargets(plan, retry)
+                || retry.unresolved().size() > best.unresolved().size()) {
+            return false;
+        }
+        // A plan may grow if the growth bought it something it could not buy any other way: an
+        // unresolved key is an item *nothing in the pack makes*, so a plan carrying one cannot be
+        // built at all. The polyethylene chain is the case - four extra lines to stop sourcing
+        // hydrogen from a hydroxide that does not exist is not a plan getting bigger, it is a plan
+        // becoming possible. Anything short of that has to fit in the same number of lines.
+        return retry.lines().size() <= best.lines().size()
+                || retry.unresolved().size() < best.unresolved().size();
+    }
+
+    /**
+     * Whether the feed was bought with a bigger power bill.
+     *
+     * <p>The counting test above cannot see this and the pack proved it matters. An acetone plan was
+     * offered a calcium acetate recipe that eats the oxygen it was throwing away, took it, and paid
+     * ten per cent more energy for four times the machines on that line — the byproduct was consumed
+     * and the factory was worse. A tungsten plan did the same thing twenty-six per cent worse. So a
+     * candidate is costed rather than counted.
+     *
+     * <p><b>The engine has to be one that can close the loop the pass just created</b>, and getting
+     * this wrong silently disabled the whole milestone for its headline case. Feeding the greenhouse's
+     * own oxygen back into a carbon dioxide reactor <em>is</em> a loop; cost it with the sequential
+     * pass and that engine — which cannot close a loop by construction — reports the oak log as an
+     * import and the plan as more expensive than the five-line beetroot chain it replaces. The pass
+     * then dutifully refused its own best answer. So a candidate with a cycle in it is costed by the
+     * simplex engine, which always answers and closes loops; everything else by the single pass,
+     * which is O(lines) and enough.
+     *
+     * <p>Above {@link #PROBE_LINE_LIMIT} lines the single pass is used regardless. A dense simplex
+     * tableau over a thousand-line plan costs more than the expansion it is judging, and a plan that
+     * large is already approximate for other reasons.
+     *
+     * <p>Note what is <em>not</em> compared: how many things the plan imports. {@link #isNoWorse}
+     * already checks the chooser's own unresolved list, which is the honest measure of "the pack
+     * cannot make this"; the solver's raw inputs also count declared raw materials such as water,
+     * where a count is not meaningful.
+     */
+    private boolean costsMore(Plan plan, ChooserResult best, ChooserResult retry) {
+        // One engine for both, decided from the pair. Choosing per candidate compares a number from
+        // one engine with a number from another, and the two do not mean the same thing: the single
+        // pass leaves a loop's demand as an import and under-counts the energy, so an acyclic
+        // candidate costed that way looks cheaper than a looping one costed exactly. That mistake
+        // silently withdrew the polyethylene win this pass had already earned.
+        SolverMode engine = probeEngine(best, retry);
+
+        SolveResult before = probe(plan, best, engine);
+        SolveResult after = probe(plan, retry, engine);
+        if (before == null || after == null) {
+            return false;
+        }
+        if (after.unsatisfied().size() > before.unsatisfied().size()) {
+            return true;
+        }
+        return after.euDrawPerSecond() > before.euDrawPerSecond() * (1 + 1e-9);
+    }
+
+    private static SolverMode probeEngine(ChooserResult a, ChooserResult b) {
+        boolean loops = !a.cycles().isEmpty() || !b.cycles().isEmpty();
+        boolean small = a.lines().size() <= PROBE_LINE_LIMIT && b.lines().size() <= PROBE_LINE_LIMIT;
+        return loops && small ? SolverMode.SIMPLEX : SolverMode.SEQUENTIAL;
+    }
+
+    private SolveResult probe(Plan plan, ChooserResult candidate, SolverMode engine) {
+        try {
+            Plan costed = plan.copy(plan.name());
+            costed.clearLines();
+            candidate.lines().forEach(costed::add);
+            costed.solverMode(engine);
+            return Solvers.solve(costed, resolver);
+        } catch (RuntimeException failure) {
+            // A plan that will not cost is not evidence against the candidate; fall back to the
+            // counting test alone rather than losing a feed to a solver problem.
+            return null;
+        }
+    }
+
+    /**
+     * What a plan makes and then has no use for.
+     *
+     * <p><b>Guaranteed outputs only.</b> Being the source of a 5% byproduct is not being a supply of
+     * it, and offering one as though it were would have the chooser choose a recipe around a trickle.
+     * The same reason {@code isOnlyWayToMakeSomething} counts only guaranteed outputs.
+     *
+     * <p>Targets are excluded, because a target is not spare — it is the point.
+     */
+    private static Set<MfpKey> spareOutputs(ChooserResult result, Plan plan) {
+        Set<MfpKey> produced = new LinkedHashSet<>();
+        Set<MfpKey> consumed = new LinkedHashSet<>();
+        for (Line line : result.lines()) {
+            for (MfpOutput output : line.recipe().outputs()) {
+                if (!output.isChanced() && output.amount() > 0) {
+                    produced.add(output.key());
+                }
+            }
+            for (MfpIngredient input : line.recipe().inputs()) {
+                if (input.consumed() && input.effectiveAmount() > 0) {
+                    consumed.addAll(input.candidates());
+                }
+            }
+        }
+        produced.removeAll(consumed);
+        plan.targets().forEach(target -> produced.remove(target.key()));
+        produced.removeIf(MfpKey::isPseudo);
+        return produced;
+    }
+
+    private static boolean consumedBy(ChooserResult result, MfpKey key) {
+        return result.lines().stream().anyMatch(line -> line.recipe().consumes(key));
+    }
+
+    private ChooserResult expandSteeringAroundPackagingLoops(Plan plan) {
+        ChooserResult first = expandAvoiding(plan, Set.of());
+        if (packagingCycles(first, plan).isEmpty()) {
+            // Either there is no loop at all, or every loop it found is one the pack builds on
+            // purpose. Steering around the second kind is the fault M11.1 exists to fix: it is not
+            // a wrong turn to undo, it is the answer, and the whole-plan engine closes it.
+            return first;
+        }
+
+        // A pinned recipe is never avoided. The retry exists to steer around packaging loops the
+        // scorer wandered into on its own; steering around a recipe the user chose deliberately is
+        // not a repair, it is an override — and it produced exactly that: a pinned greenhouse recipe
+        // dropped in favour of a crafting-table one, under a warning telling the user to pin the
+        // recipe they had already pinned. If the only way to break the loop is through a pin, the
+        // loop is real and the matrix engine is the answer.
+        //
+        // <b>A standing default is the same kind of statement</b>, and it was not covered — found
+        // the first time the pack could be driven headlessly (STATUS §9.16). "This is how I make
+        // lubricant" was being dropped by the avoidance pass exactly as a pin used to be, and the
+        // plan then rebuilt itself around a recipe the user had never chosen, three steps away from
+        // the one they had. The distinction that matters is not where the decision is stored but who
+        // made it: the retry exists to undo the *scorer's* wandering, and neither of these is that.
+        Set<String> pinned = new LinkedHashSet<>(plan.recipeChoices().values());
+        pinned.addAll(preferences.defaultRecipes().values());
+
+        Set<String> avoided = new LinkedHashSet<>();
+        // Every recipe seen on a cycle, including the pinned ones that are never avoided. This is
+        // what says whether an item lost to the retry was a link of the loop — which is the point of
+        // breaking it — or collateral damage; see bannedOutOfExistence.
+        Set<String> loopRecipes = new LinkedHashSet<>();
+        ChooserResult current = first;
+        for (int attempt = 0; attempt < MAX_CYCLE_RETRIES; attempt++) {
+            // Avoid the whole loop, not just the recipe that closed it. Dropping one link of a
+            // four-recipe loop usually just re-forms the same loop through a different link, so a
+            // one-at-a-time retry converges far too slowly to be worth the passes.
+            Set<String> nextToAvoid = recipesIn(packagingCycles(current, plan));
+            loopRecipes.addAll(nextToAvoid);
+            nextToAvoid.removeAll(pinned);
+            // And never the only way to make something. A cycle is broken by dropping a link the
+            // plan can replace, and the members are not equally replaceable: the loop that cost
+            // Star-Technology its dust ran cobblestone -> gravel -> sand -> dust -> sieve, where
+            // cobblestone has seven recipes and dust has exactly one. Banning the whole cycle
+            // banned the one, and the plan then reported an item the pack plainly makes as an
+            // import. Sole sources are what the loop has to be broken *around*, not at.
+            nextToAvoid.removeIf(id -> isOnlyWayToMakeSomething(index.recipe(id), plan));
+            if (nextToAvoid.isEmpty() || !avoided.addAll(nextToAvoid)) {
+                // Every remaining link of the loop is pinned, so there is nothing left to try.
+                break;
+            }
+            ChooserResult retry = expandAvoiding(plan, avoided);
+            if (bannedOutOfExistence(plan, first, retry, avoided, loopRecipes)) {
+                // And stop. The avoided set only grows, so every later round bans strictly more and
+                // can only lose more of the plan; carrying on would spend five more full walks of
+                // the graph to arrive at the same answer. The loop is that answer.
+                break;
+            }
+            // Accepted when it is acyclic and can still make what was asked for. Note what is
+            // deliberately *not* required: an empty unresolved list. Unresolved keys are the plan's
+            // imports, and every real GregTech chain bottoms out in raw ore that nothing produces —
+            // demanding none would reject every alternative and make this whole pass dead code.
+            if (packagingCycles(retry, plan).isEmpty() && stillMakesTargets(plan, retry)) {
+                return retry.withAvoided(List.copyOf(avoided));
+            }
+            current = retry;
+        }
+        return first;
+    }
+
+    /**
+     * Whether steering around the loop has left an item with no way to make it at all.
+     *
+     * <p>The avoidance pass bans every recipe on a cycle, and after a few rounds that is a large
+     * set. If one of those recipes was also the only way to make something else the plan needs, the
+     * retry does not merely take a different route — it reports an item the pack demonstrably makes
+     * as an import, and (before this check) said "nothing in the index produces it", which is a
+     * false statement about the pack rather than a report about the plan. Found against
+     * Star-Technology: a lubricant plan lost {@code exnihilosequentia:dust} this way, having
+     * accepted a retry that was acyclic and still made lubricant.
+     *
+     * <p>A retry is allowed to import <em>different</em> things — a different route bottoms out in
+     * different ore, and rejecting that would make the pass dead code again (§4b). What it may not
+     * do is import something whose every usable recipe this pass is the reason for banning. When
+     * that happens the loop is preferred: a loop the matrix engine closes is a correct answer, and
+     * an acyclic plan with an invented import is not.
+     */
+    private boolean bannedOutOfExistence(Plan plan, ChooserResult before, ChooserResult retry,
+                                         Set<String> avoided, Set<String> loopRecipes) {
+        for (MfpKey key : retry.unresolved()) {
+            if (before.unresolved().contains(key)) {
+                continue;
+            }
+            if (usable(key, plan).isEmpty() || !usable(key, plan, avoided, Map.of()).isEmpty()) {
+                // Either it was never makeable, or it still is: a retry is allowed to import
+                // *different* things, because a different route bottoms out in different ore.
+                continue;
+            }
+            if (isLoopItem(key, loopRecipes)) {
+                // A link of the loop itself. Breaking a loop necessarily turns one of its own items
+                // into an import — that is what breaking it means — so this one is intended.
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Whether an item is one the loop passes through, rather than one that hangs off it.
+     *
+     * <p>Produced by a recipe on the cycle <em>and</em> consumed by one. Bone meal made from cabbage
+     * and consumed to grow cabbage is such an item, and importing it is exactly how that loop is
+     * broken. The dust a loop recipe happens to give off, consumed by a line that has nothing to do
+     * with the loop, is not: banning it is collateral damage and the plan is better off looping.
+     */
+    private boolean isLoopItem(MfpKey key, Set<String> loopRecipes) {
+        boolean produced = false;
+        boolean consumed = false;
+        for (String id : loopRecipes) {
+            MfpRecipe recipe = index.recipe(id);
+            if (recipe == null) {
+                continue;
+            }
+            produced |= recipe.produces(key);
+            consumed |= recipe.consumes(key);
+        }
+        return produced && consumed;
+    }
+
+    /**
+     * Whether this recipe is the only usable way to make one of the things it makes.
+     *
+     * <p>Only its <em>guaranteed</em> outputs count. Being the sole source of a 5% byproduct is not
+     * being the way to make it, and treating it as such would make half the loops in a GregTech
+     * graph unbreakable — every macerator recipe is the only source of some trace dust.
+     */
+    private boolean isOnlyWayToMakeSomething(MfpRecipe recipe, Plan plan) {
+        if (recipe == null) {
+            return false;
+        }
+        for (MfpOutput output : recipe.outputs()) {
+            if (output.isChanced() || output.amount() <= 0) {
+                continue;
+            }
+            List<MfpRecipe> ways = usable(output.key(), plan);
+            if (ways.size() == 1 && ways.get(0).id().equals(recipe.id())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether a retry can still produce everything the plan asked for. */
+    private static boolean stillMakesTargets(Plan plan, ChooserResult result) {
+        if (result.lines().isEmpty()) {
+            return false;
+        }
+        for (TargetOutput target : plan.targets()) {
+            if (result.unresolved().contains(target.key())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The cycles worth steering around: the ones that cannot supply anything (M11.1).
+     *
+     * <p>The test is structural rather than a heuristic, and it is a statement about flow. A cycle
+     * is <b>productive</b> when material goes in one side and comes out the other:
+     *
+     * <ol>
+     *   <li>it <b>consumes something from outside itself</b> — a cycle whose only inputs are its own
+     *       outputs cannot supply anything, which is every one of GregTech's packaging loops: nugget
+     *       to ingot and back, ingot to block and back, macerate and re-smelt; and
+     *   <li>it <b>emits something the rest of the plan wants</b> and does not eat again.
+     * </ol>
+     *
+     * <p>Both halves are load-bearing, and the second one was learned the hard way against the pack.
+     * On the first condition alone, a sandstone loop — sand pressed to sandstone, cut to a slab,
+     * formed to a pillar, hammered back to sand — counts as productive, because the cutter takes
+     * distilled water as a coolant. It consumes something from outside and supplies nothing, and
+     * keeping it cost a lubricant plan five lines that solved to zero and a page of warnings about
+     * running machines backwards. Asking what the loop <em>emits</em> is what tells a coolant from a
+     * feedstock without having to know what either is.
+     *
+     * <p>Energy is excluded from the reckoning, and has to be: every loop consumes it, so counting it
+     * would make every loop pass the first test.
+     *
+     * <p>Computed on the cycle as a whole rather than per recipe. Any single recipe in a loop consumes
+     * something the loop makes — that is what being in a loop means — so the question only has an
+     * answer at the level of the cycle.
+     */
+    private List<List<String>> packagingCycles(ChooserResult result, Plan plan) {
+        List<List<String>> packaging = new ArrayList<>();
+        for (List<String> cycle : result.cycles()) {
+            if (!isProductive(cycle, result, plan)) {
+                packaging.add(cycle);
+            }
+        }
+        return packaging;
+    }
+
+    private boolean isProductive(List<String> cycle, ChooserResult result, Plan plan) {
+        Set<String> members = new LinkedHashSet<>(cycle);
+        Set<MfpKey> produced = new LinkedHashSet<>();
+        Set<MfpKey> consumed = new LinkedHashSet<>();
+        List<MfpIngredient> inputs = new ArrayList<>();
+        for (String id : members) {
+            MfpRecipe recipe = index.recipe(id);
+            if (recipe == null) {
+                continue;
+            }
+            for (MfpOutput output : recipe.outputs()) {
+                // Guaranteed outputs only: a loop that hands its own input back one time in twenty
+                // is not closed, it is a loop being topped up from outside.
+                if (!output.isChanced() && output.amount() > 0) {
+                    produced.add(output.key());
+                }
+            }
+            for (MfpIngredient input : recipe.inputs()) {
+                if (input.consumed() && input.effectiveAmount() > 0) {
+                    inputs.add(input);
+                    consumed.addAll(input.candidates());
+                }
+            }
+        }
+
+        boolean drawsFromOutside = false;
+        for (MfpIngredient input : inputs) {
+            boolean fromInside = false;
+            for (MfpKey candidate : input.candidates()) {
+                fromInside |= candidate.isPseudo() || produced.contains(candidate);
+            }
+            if (!fromInside) {
+                drawsFromOutside = true;
+                break;
+            }
+        }
+        if (!drawsFromOutside) {
+            return false;
+        }
+
+        for (MfpKey key : produced) {
+            if (key.isPseudo() || consumed.contains(key)) {
+                continue;
+            }
+            if (wantedOutsideTheCycle(key, members, result, plan)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether something the plan asked for, or a line that is not in this loop, wants {@code key}. */
+    private static boolean wantedOutsideTheCycle(MfpKey key, Set<String> members,
+                                                 ChooserResult result, Plan plan) {
+        for (TargetOutput target : plan.targets()) {
+            if (target.key().equals(key)) {
+                return true;
+            }
+        }
+        for (Line line : result.lines()) {
+            if (!members.contains(line.recipe().id()) && line.recipe().consumes(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Set<String> recipesIn(List<List<String>> cycles) {
+        Set<String> ids = new LinkedHashSet<>();
+        cycles.forEach(ids::addAll);
+        return ids;
+    }
+
+    /**
+     * One expansion, with the blacklist's consequences followed as far as they go.
+     *
+     * <p><b>Blacklisting an item has to reach further than the recipes that name it.</b> Blocking
+     * inferium essence and asking for oak logs first produced a plan that burned wood essence,
+     * mixed that from air, water and earth essence, and then reported three imports because the only
+     * recipes for those three need inferium — which is a correct account of one route and a useless
+     * answer to the question. What the user said is "I have no inferium", and the consequence of
+     * that is "so I have no air essence either", all the way up until a route that never wanted any
+     * appears — a greenhouse, in that plan.
+     *
+     * <p>So an item every one of whose recipes is unusable becomes unavailable in its own right, and
+     * the walk runs again knowing it. Each round can only add to that set, and it is bounded, so it
+     * settles. Two things it deliberately does not do:
+     *
+     * <ul>
+     *   <li><b>It never gives up a plan to keep the rule.</b> A round is accepted only if the plan
+     *       still makes what was asked for; where no route avoids the blacklisted item, the first
+     *       result is kept, imports and all, because that is then the honest answer rather than an
+     *       empty plan.
+     *   <li><b>It never touches an ordinary import.</b> Only keys whose failure was <em>caused</em>
+     *       by the blacklist propagate. Raw ore is unresolved too, and it is unresolved because the
+     *       world makes it, which is not a reason to abandon a route.
+     * </ul>
+     */
+    private ChooserResult expandAvoiding(Plan plan, Set<String> extraBlacklist) {
+        Map<MfpKey, MfpKey> unreachable = new LinkedHashMap<>();
+        Attempt attempt = expandOnce(plan, extraBlacklist, unreachable);
+        for (int round = 0; round < MAX_BLOCK_ROUNDS && !attempt.blockedKeys().isEmpty(); round++) {
+            Map<MfpKey, MfpKey> next = new LinkedHashMap<>(unreachable);
+            next.putAll(attempt.blockedKeys());
+            if (next.size() == unreachable.size()) {
+                break;
+            }
+            Attempt retry = expandOnce(plan, extraBlacklist, next);
+            if (!stillMakesTargets(plan, retry.result())) {
+                break;
+            }
+            unreachable = next;
+            attempt = retry;
+        }
+        return attempt.result();
+    }
+
+    private Attempt expandOnce(Plan plan, Set<String> extraBlacklist, Map<MfpKey, MfpKey> unreachable) {
+        Expansion expansion = new Expansion(plan, extraBlacklist, unreachable);
+        for (TargetOutput target : plan.targets()) {
+            expansion.resolve(target.key(), 0);
+        }
+        return expansion.finish();
+    }
+
+    /**
+     * One walk's result, and which keys it could not make <em>because of the blacklist</em>.
+     *
+     * <p>The second half is not in {@link ChooserResult} because it is scaffolding for the next
+     * round rather than something a caller should act on: by the time expansion finishes, either the
+     * plan routed around those keys and they are gone, or it could not and they are imports with a
+     * reason attached.
+     */
+    private record Attempt(ChooserResult result, Map<MfpKey, MfpKey> blockedKeys) {}
+
+    /**
+     * The ranked alternatives for producing {@code key}, for the recipe picker.
+     *
+     * <p>Each recipe comes back with the plan's and the player's preferred items already applied,
+     * which is not cosmetic: the picker lists what a line would actually eat, and until M8 it listed
+     * the index's own candidate order and only showed the preference once the row had been clicked
+     * and the line rebuilt. Two screens describing the same recipe differently is the one thing a
+     * planner cannot afford, and doing it here means every caller is fixed rather than one screen.
+     */
+    public List<RecipeScorer.Scored> alternatives(MfpKey key, Plan plan) {
+        rawMaterials = plan == null ? RawMaterials.defaults() : plan.rawMaterials();
+        Set<MfpKey> produced = plan == null ? Set.of() : producedBy(plan);
+        Set<MfpKey> preferred = preferences.preferredItemsFor(plan);
+        List<RecipeScorer.Scored> ranked = RecipeScorer.rank(key, usable(key, plan), produced, oracle);
+        if (preferred.isEmpty()) {
+            return ranked;
+        }
+        List<RecipeScorer.Scored> shown = new ArrayList<>(ranked.size());
+        for (RecipeScorer.Scored scored : ranked) {
+            // Scored on the recipe as the index holds it and displayed as the plan would run it: a
+            // preference reorders candidates and changes no amount, so the ranking is the same either
+            // way and scoring the rewritten copy would only risk the two drifting apart.
+            shown.add(new RecipeScorer.Scored(scored.recipe().withPreferredInputs(preferred),
+                    scored.score(), scored.reasons()));
+        }
+        return shown;
+    }
+
+    /**
+     * The recipes for {@code key} the plan may not use, and why.
+     *
+     * <p>The picker's other half of the blocked-item rule. Filtering silently would leave the user
+     * looking at an import with no way to find out what happened to the recipes that would have
+     * satisfied it, and no way to change their mind — so the recipes are still obtainable, marked.
+     */
+    /**
+     * Every recipe for {@code key} the chooser refused to rank, and the reason in words.
+     *
+     * <p>The other half of {@link #alternatives}, and the thing that was missing when a plan said an
+     * item could not be made: the ranked list shows what was considered, and this shows what was
+     * not. A recipe is excluded for exactly four reasons and they are not interchangeable — the user
+     * hid it, an input is blacklisted, it never actually yields the item, or the loop-avoidance pass
+     * banned it. Only the first two are decisions the user made, and only the last is MFP's.
+     *
+     * <p>The avoidance case cannot be answered from a recipe alone, so it is not answered here: the
+     * set belongs to a particular expansion and lives on {@link ChooserResult#avoidedForCycles()}.
+     * Callers that have one cross-reference it.
+     */
+    public Map<MfpRecipe, String> excludedAlternatives(MfpKey key, Plan plan) {
+        Map<MfpRecipe, String> excluded = new LinkedHashMap<>();
+        Set<String> hidden = plan == null ? Set.of() : plan.blacklist();
+        for (MfpRecipe recipe : index.producing(key)) {
+            if (hidden.contains(recipe.id())) {
+                excluded.put(recipe, "you hid it in this plan");
+                continue;
+            }
+            if (isDeadEnd(recipe, key)) {
+                excluded.put(recipe, "never actually yields " + key);
+                continue;
+            }
+            MfpKey offender = blockedInput(recipe, plan);
+            if (offender != null) {
+                excluded.put(recipe, "needs " + offender + ", which is blacklisted");
+            }
+        }
+        return excluded;
+    }
+
+    public Map<MfpRecipe, MfpKey> blockedAlternatives(MfpKey key, Plan plan) {
+        Map<MfpRecipe, MfpKey> blocked = new LinkedHashMap<>();
+        for (MfpRecipe recipe : index.producing(key)) {
+            MfpKey offender = blockedInput(recipe, plan);
+            if (offender != null) {
+                blocked.put(recipe, offender);
+            }
+        }
+        return blocked;
+    }
+
+    /**
+     * The blocked item that makes this recipe unusable, or null if none does.
+     *
+     * <p>Every candidate of a consumed input must be blocked before the recipe is: an ingredient
+     * accepting either inferium or a plain seed is still satisfiable when only the inferium is
+     * blocked, and the plan simply takes the other one ({@link Expansion#chosenCandidate}).
+     */
+    private MfpKey blockedInput(MfpRecipe recipe, Plan plan) {
+        return blockedInput(recipe, plan, Map.of());
+    }
+
+    /**
+     * @param unreachable items whose every route runs through a blacklisted one, and the blacklisted
+     *                    item each of them ultimately blames
+     */
+    private MfpKey blockedInput(MfpRecipe recipe, Plan plan, Map<MfpKey, MfpKey> unreachable) {
+        for (MfpIngredient input : recipe.inputs()) {
+            if (!input.consumed() || input.effectiveAmount() <= 0) {
+                // A catalyst is a thing you own rather than a thing you consume, and the statement
+                // being made here is "I have no supply of this", not "I do not have one".
+                continue;
+            }
+            MfpKey blocked = null;
+            for (MfpKey candidate : input.candidates()) {
+                MfpKey cause = causeOfUnavailability(candidate, plan, unreachable);
+                if (cause == null) {
+                    blocked = null;
+                    break;
+                }
+                blocked = cause;
+            }
+            if (blocked != null) {
+                return blocked;
+            }
+        }
+        return null;
+    }
+
+    /** The blacklisted item that makes {@code key} unavailable, directly or upstream. */
+    private MfpKey causeOfUnavailability(MfpKey key, Plan plan, Map<MfpKey, MfpKey> unreachable) {
+        if (preferences.blocks(plan, key)) {
+            return key;
+        }
+        return unreachable.get(key);
+    }
+
+    private List<MfpRecipe> usable(MfpKey key, Plan plan) {
+        return usable(key, plan, Set.of(), Map.of());
+    }
+
+    private List<MfpRecipe> usable(MfpKey key, Plan plan, Set<String> extraBlacklist,
+                                   Map<MfpKey, MfpKey> unreachable) {
+        Set<String> blacklist = plan == null ? Set.of() : plan.blacklist();
+        List<MfpRecipe> usable = new ArrayList<>();
+        for (MfpRecipe recipe : index.producing(key)) {
+            if (blacklist.contains(recipe.id()) || extraBlacklist.contains(recipe.id())) {
+                continue;
+            }
+            if (isDeadEnd(recipe, key)) {
+                continue;
+            }
+            if (blockedInput(recipe, plan, unreachable) != null) {
+                // An item the player says they have no supply of takes every chain through it out of
+                // consideration, not just off the screen. This is the difference between the item
+                // blacklist and the recipe one: hiding a recipe steers this plan, blocking an item
+                // steers every recipe that wanted it.
+                continue;
+            }
+            usable.add(recipe);
+        }
+        return usable;
+    }
+
+    /** A recipe whose only route to {@code key} never actually fires is not a way of making it. */
+    private static boolean isDeadEnd(MfpRecipe recipe, MfpKey key) {
+        boolean sawKey = false;
+        for (MfpOutput output : recipe.outputs()) {
+            if (!output.key().equals(key)) {
+                continue;
+            }
+            sawKey = true;
+            if (output.chance() > 0 && output.amount() > 0) {
+                return false;
+            }
+        }
+        return sawKey;
+    }
+
+    private static Set<MfpKey> producedBy(Plan plan) {
+        Set<MfpKey> produced = new LinkedHashSet<>();
+        for (Line line : plan.allLines()) {
+            line.recipe().outputs().forEach(output -> produced.add(output.key()));
+        }
+        return produced;
+    }
+
+    /** One expansion run. Holds the graph being built and the walk's current path. */
+    private final class Expansion {
+
+        private final Plan plan;
+        private final Set<String> extraBlacklist;
+        /** Items an earlier round found no route to, and the blacklisted item each of them blames. */
+        private final Map<MfpKey, MfpKey> unreachable;
+        private final Map<MfpKey, MfpRecipe> chosen = new LinkedHashMap<>();
+        private final Map<String, MfpRecipe> nodes = new LinkedHashMap<>();
+        private final Map<String, Set<String>> dependsOn = new LinkedHashMap<>();
+        private final Deque<String> path = new ArrayDeque<>();
+        private final List<List<String>> cycles = new ArrayList<>();
+        private final Set<MfpKey> unresolved = new LinkedHashSet<>();
+        private final Set<MfpKey> rawMaterials = new LinkedHashSet<>();
+        private final Set<MfpKey> truncated = new LinkedHashSet<>();
+        private final Set<String> expanded = new LinkedHashSet<>();
+        private final Map<MfpKey, String> importReasons = new LinkedHashMap<>();
+
+        private final Map<MfpKey, MfpKey> blockedKeys = new LinkedHashMap<>();
+
+        private Expansion(Plan plan, Set<String> extraBlacklist, Map<MfpKey, MfpKey> unreachable) {
+            this.plan = plan;
+            this.extraBlacklist = extraBlacklist;
+            this.unreachable = unreachable;
+        }
+
+        /** Find or reuse a recipe for {@code key}, and recurse into its inputs. */
+        private MfpRecipe resolve(MfpKey key, int depth) {
+            // Energy, computation and the user's declared raw materials terminate the walk. Without
+            // a cutoff, expanding a GregTech graph does not stop anywhere useful.
+            //
+            // Except at depth zero, where the key is one of the plan's own targets. "How do I make
+            // water" is a question with an answer, and refusing to expand the very thing that was
+            // asked for would hand back an empty plan. Being free is a reason not to go looking for
+            // it, not a reason not to answer.
+            //
+            // A pinned recipe outranks both cutoffs below it (M11.2). "This item is free" and "here
+            // is how I make it" are both the user's statements, and the second one is about this
+            // plan and this item, so it is the more specific. Without this the picker could be
+            // opened on a raw import — water, crushed ore, anything the walk stopped at — and the
+            // recipe chosen there would do nothing at all, which is the one outcome a picker must
+            // never have. Energy is still not expandable: it is not an item anyone makes a recipe
+            // for, it is how the plan accounts for machines running.
+            boolean answered = plan.recipeChoice(key) != null;
+            if (key.isPseudo() || (!answered && depth > 0 && plan.rawMaterials().contains(key))) {
+                rawMaterials.add(key);
+                return null;
+            }
+            // An ore, in any of its forms, is where a chain ends. Star-Technology is a skyblock:
+            // there is no ore block and no sand to mine, and crushed ore comes out of the pack's own
+            // machines rather than out of the ground. Walking below crushed therefore invents a
+            // chain nobody can build, which is how a tin plan came to import raw cassiterite sand.
+            // Stopping here answers "make me tin" with "feed it crushed tin ore", which is the
+            // shape of the answer a player wants; the picker still offers the deeper chain, and the
+            // plan settings still take the item back off the list.
+            if (!answered && depth > 0 && isOreForm(key)) {
+                rawMaterials.add(key);
+                return null;
+            }
+            if (depth > MAX_DEPTH) {
+                truncated.add(key);
+                return null;
+            }
+            // Hand-built plans stop here (M11.3): below the target, an input the user has not
+            // answered is an import, and answering it is what adds the next line. Recorded with a
+            // reason, because the alternative message — "nothing in the index produces this" — is a
+            // claim about the pack, and here it would be a claim about a setting.
+            if (!plan.autoResolve() && !answered && depth > 0) {
+                unresolved.add(key);
+                if (!index.producing(key).isEmpty()) {
+                    importReasons.put(key, "auto-resolve is off - pick a recipe to make it here");
+                }
+                return null;
+            }
+
+            MfpRecipe recipe = chosen.get(key);
+            if (recipe == null) {
+                MfpRecipe ancestor = ancestorProducing(key);
+                if (ancestor != null) {
+                    // Close the loop rather than building a second source for something this very
+                    // branch already makes. See the method's own note for why it is the answer.
+                    cycles.add(cycleFrom(ancestor.id()));
+                    return ancestor;
+                }
+                MfpRecipe sibling = chosenProducing(key);
+                if (sibling != null) {
+                    chosen.put(key, sibling);
+                    return sibling;
+                }
+                recipe = pick(key);
+                if (recipe == null) {
+                    unresolved.add(key);
+                    return null;
+                }
+                chosen.put(key, recipe);
+            }
+
+            if (path.contains(recipe.id())) {
+                // A real loop: this recipe is already being expanded further up the path.
+                cycles.add(cycleFrom(recipe.id()));
+                return recipe;
+            }
+
+            nodes.putIfAbsent(recipe.id(), recipe);
+            dependsOn.computeIfAbsent(recipe.id(), id -> new LinkedHashSet<>());
+
+            // Recipes are expanded once; revisiting only adds edges, which the caller does.
+            if (!expanded.add(recipe.id())) {
+                return recipe;
+            }
+
+            path.push(recipe.id());
+            for (MfpIngredient input : recipe.inputs()) {
+                if (!input.consumed() || input.effectiveAmount() <= 0) {
+                    continue;
+                }
+                MfpRecipe producer = resolve(chosenCandidate(input), depth + 1);
+                if (producer != null && !producer.id().equals(recipe.id())) {
+                    dependsOn.get(recipe.id()).add(producer.id());
+                }
+            }
+            path.pop();
+            return recipe;
+        }
+
+        /**
+         * A recipe already being expanded further up this branch that makes {@code key} anyway.
+         *
+         * <p>The shape this exists for: growing a tree consumes carbon dioxide and gives off oxygen,
+         * and one way of making carbon dioxide is to burn charcoal in oxygen. Expanding that input
+         * the ordinary way asks "what makes oxygen?" of the whole index, and the answer it finds is
+         * electrolysing acidic bromine exhaust — so a two-recipe loop the player can actually build
+         * became a thirty-seven line plan dragging in brine, platinum group sludge and aqua regia,
+         * none of which the plan had any reason to make. The matrix engine then had more unknowns
+         * than items and could not solve it at all.
+         *
+         * <p>The rule is deliberately restricted to <em>ancestors</em> rather than to every line
+         * chosen so far. An ancestor producing this input means the branch is already a loop: the
+         * consumer exists because the ancestor demanded its output, and the ancestor hands back the
+         * input in exchange. Sourcing it from anywhere else is inventing a chain to supply something
+         * the plan is already handing over. Any line in the plan would be a much broader claim —
+         * that a stray byproduct anywhere is a supply for any demand — and a plan needing a thousand
+         * ash a second would then be silently plumbed into a line that makes a trickle of it and
+         * scaled to absurdity by the matrix engine, so the wider rule is not taken.
+         *
+         * <p>Nearest ancestor first, which is the tightest loop and the one the player is looking at.
+         */
+        private MfpRecipe ancestorProducing(MfpKey key) {
+            for (String id : path) {            // ArrayDeque push/iterate is innermost-first
+                MfpRecipe candidate = nodes.get(id);
+                if (candidate != null && candidate.produces(key)) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * A line already in this plan that makes {@code key} too, in a byproduct-feeding round.
+         *
+         * <p>This is the sibling half of {@link #ancestorProducing}, and the pack is what argued for
+         * it. Water electrolysis makes hydrogen and oxygen; so does decomposing hydroxide. A walk
+         * that meets oxygen on one branch and hydrogen on another picks a recipe for each — because
+         * {@code chosen} is keyed by item — and the plan ends up with both electrolysers, each of
+         * them over-producing the other's product. The solver then has two sources for both gases,
+         * cannot decide between them, and reports lines running backwards.
+         *
+         * <p>{@code §6d.28} rejected exactly this rule at the time, and its objection was about
+         * scale: a plan wanting a thousand ash a second would be plumbed into a line making a
+         * trickle, and the matrix engine would scale that line to absurdity to balance it. M10
+         * answers that — the simplex engine takes what there is and imports the rest — and the
+         * byproduct pass's own acceptance test is the second guard: a round is kept only if the plan
+         * came out no larger and no hungrier. So the rule is taken now, and only inside a feeding
+         * round, where both of those are true.
+         *
+         * <p><b>Guaranteed outputs only.</b> Being handed a 5% byproduct is not being supplied.
+         */
+        private MfpRecipe chosenProducing(MfpKey key) {
+            if (!feedingRound) {
+                return null;
+            }
+            for (MfpRecipe candidate : nodes.values()) {
+                for (MfpOutput output : candidate.outputs()) {
+                    if (output.key().equals(key) && !output.isChanced() && output.amount() > 0) {
+                        return candidate;
+                    }
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Which of an ambiguous ingredient's candidates to expand.
+         *
+         * <p>A tag input is genuinely ambiguous, so the user's pin wins if they made one. Otherwise
+         * the first candidate is taken and the ambiguity is preserved on the ingredient itself for
+         * the picker to surface — the index must not silently narrow it.
+         */
+        private boolean unavailable(MfpKey key) {
+            return causeOfUnavailability(key, plan, unreachable) != null;
+        }
+
+        private MfpKey chosenCandidate(MfpIngredient input) {
+            for (MfpKey candidate : input.candidates()) {
+                if (plan.preferredItems().contains(candidate) && !unavailable(candidate)) {
+                    return candidate;
+                }
+            }
+            // The standing preference below the plan's own, because that is what "default" means.
+            for (MfpKey candidate : input.candidates()) {
+                if (preferences.preferredItems().contains(candidate) && !unavailable(candidate)) {
+                    return candidate;
+                }
+            }
+            for (MfpKey candidate : input.candidates()) {
+                if (unavailable(candidate)) {
+                    continue;
+                }
+                if (plan.recipeChoice(candidate) != null || chosen.containsKey(candidate)) {
+                    return candidate;
+                }
+            }
+            // A blocked primary with an unblocked alternative takes the alternative: the recipe is on
+            // the plan precisely because it was still satisfiable, and expanding the blocked item
+            // would plan a chain the player just said they cannot run.
+            for (MfpKey candidate : input.candidates()) {
+                if (!unavailable(candidate)) {
+                    return candidate;
+                }
+            }
+            return input.primary();
+        }
+
+        private MfpRecipe pick(MfpKey key) {
+            String pinned = plan.recipeChoice(key);
+            // Deliberately not checking extraBlacklist: a pin outranks the loop-avoidance pass, and
+            // the pass is not supposed to put a pinned recipe in there in the first place.
+            if (pinned != null) {
+                MfpRecipe recipe = index.recipe(pinned);
+                // A pin does not survive the item it needs being blacklisted. Blacklisting is the
+                // more recent statement and the stronger one — "I have no supply of this" is a fact
+                // about the save, where a pin is a preference about a route — and honouring the pin
+                // anyway would make blacklisting an item appear to do nothing on exactly the lines
+                // the user was looking at when they did it.
+                if (recipe != null && recipe.produces(key)
+                        && blockedInput(recipe, plan, unreachable) == null) {
+                    return recipe;
+                }
+            }
+            // The player's standing way of making this, below their pin and above the scorer. It is
+            // checked against the plan's own exclusions rather than trusted outright: a default that
+            // survived being hidden or blocked in this plan would make those buttons do nothing.
+            MfpRecipe standing = standingDefault(key);
+            if (standing != null) {
+                return standing;
+            }
+            List<RecipeScorer.Scored> ranked = RecipeScorer.rank(
+                    key, usable(key, plan, extraBlacklist, unreachable), chosenOutputs(), oracle);
+            if (ranked.isEmpty()) {
+                recordWhyNothingWorks(key);
+                return null;
+            }
+            return ranked.get(0).recipe();
+        }
+
+        private MfpRecipe standingDefault(MfpKey key) {
+            String defaultId = preferences.defaultRecipe(key);
+            // Deliberately not checking extraBlacklist any more, for the reason a pin does not:
+            // the avoidance pass is not supposed to put a standing default in there at all, and
+            // when it did, the plan quietly rebuilt itself around a recipe the user never chose.
+            // The plan's own blacklist still wins — that is this plan saying "not this one, here".
+            if (defaultId == null || plan.blacklist().contains(defaultId)) {
+                return null;
+            }
+            MfpRecipe recipe = index.recipe(defaultId);
+            if (recipe == null || !recipe.produces(key)
+                    || blockedInput(recipe, plan, unreachable) != null) {
+                // A pack update that removed the recipe, or a plan that blocked one of its inputs.
+                // Falling through to the scorer is the same leniency a stale pin gets (PlanStore).
+                return null;
+            }
+            return recipe;
+        }
+
+        /**
+         * Why an item has to be imported, whenever the answer is anything other than the pack.
+         *
+         * <p>{@code ChooserResult} says "nothing in the index produces X" for every unresolved key
+         * that has no reason recorded here, and that sentence is a claim about the pack. It was
+         * being made about items the pack plainly makes — anything whose recipes MFP itself had
+         * removed from consideration, whether the user hid them, blocked an input, or the
+         * loop-avoidance pass banned them. A planner that misreports its own decision as a fact
+         * about the world sends the user looking for a recipe that is right there (plan P4, P5).
+         *
+         * <p>So every exclusion this class applies is accounted for. The blocked-item case
+         * additionally feeds the next round, because "every way to make this needs something you
+         * have none of" makes the item itself unavailable.
+         */
+        private void recordWhyNothingWorks(MfpKey key) {
+            List<MfpRecipe> producers = index.producing(key);
+            if (producers.isEmpty()) {
+                // The honest case, and the only one the default message describes.
+                return;
+            }
+
+            MfpKey offender = null;
+            int blocked = 0;
+            int hidden = 0;
+            int avoided = 0;
+            for (MfpRecipe candidate : producers) {
+                MfpKey found = blockedInput(candidate, plan, unreachable);
+                if (found != null) {
+                    offender = found;
+                    blocked++;
+                } else if (plan.blacklist().contains(candidate.id())) {
+                    hidden++;
+                } else if (extraBlacklist.contains(candidate.id())) {
+                    avoided++;
+                }
+            }
+            if (offender != null) {
+                importReasons.put(key, blocked + " recipe(s) for it need " + offender
+                        + ", which you have blacklisted");
+                // Remembered so the next round can treat this item as unavailable in its own right:
+                // if the only ways to make it need a blacklisted item, then so does it, and a route
+                // above that wanted it should be looking elsewhere.
+                blockedKeys.put(key, offender);
+            } else if (avoided > 0) {
+                importReasons.put(key, avoided + " recipe(s) for it were passed over to keep the "
+                        + "plan acyclic - pin one to use it anyway");
+            } else if (hidden > 0) {
+                importReasons.put(key, "you hid " + hidden + " recipe(s) for it");
+            }
+        }
+
+        private Set<MfpKey> chosenOutputs() {
+            Set<MfpKey> produced = new LinkedHashSet<>();
+            nodes.values().forEach(recipe -> recipe.outputs().forEach(o -> produced.add(o.key())));
+            return produced;
+        }
+
+        private List<String> cycleFrom(String recipeId) {
+            List<String> cycle = new ArrayList<>();
+            for (String onPath : path) {
+                cycle.add(0, onPath);
+                if (onPath.equals(recipeId)) {
+                    break;
+                }
+            }
+            cycle.add(recipeId);
+            return cycle;
+        }
+
+        private Attempt finish() {
+            List<Line> lines = new ArrayList<>();
+            Set<MfpKey> preferred = preferences.preferredItemsFor(plan);
+            for (MfpRecipe recipe : order()) {
+                MachineConfig machine = MachinePicker.pick(index, recipe, plan, preferences);
+                // The user's choice of item for an ambiguous input is baked into the line's own copy
+                // of the recipe rather than carried alongside it, so the solver reads it without
+                // knowing it exists. Anything else risks a plan that expands wood pulp and demands
+                // wood chips.
+                lines.add(new Line(recipe.withPreferredInputs(withUnblocked(recipe, preferred)),
+                        machine));
+            }
+            return new Attempt(new ChooserResult(lines, List.copyOf(cycles), List.copyOf(unresolved),
+                    List.copyOf(rawMaterials), List.copyOf(truncated), List.of(),
+                    Map.copyOf(importReasons)), Map.copyOf(blockedKeys));
+        }
+
+        /**
+         * The preferred items, plus a substitute for any input whose first candidate is blocked.
+         *
+         * <p>The line's copy of the recipe is what the solver reads, so an ingredient still fronted
+         * by a blocked item would have the plan demanding the very thing the player said they have
+         * none of — while the walk, which consults {@link #chosenCandidate}, had already expanded the
+         * alternative. Applied last so it wins, and only where it changes something.
+         */
+        private Set<MfpKey> withUnblocked(MfpRecipe recipe, Set<MfpKey> preferred) {
+            Set<MfpKey> keys = null;
+            for (MfpIngredient input : recipe.inputs()) {
+                if (!input.isAmbiguous() || !unavailable(input.primary())) {
+                    continue;
+                }
+                MfpKey substitute = chosenCandidate(input);
+                if (!unavailable(substitute)) {
+                    if (keys == null) {
+                        keys = new LinkedHashSet<>(preferred);
+                    }
+                    keys.add(substitute);
+                }
+            }
+            return keys == null ? preferred : keys;
+        }
+
+        /**
+         * Topological order: every recipe before the recipes it depends on.
+         *
+         * <p>Kahn's algorithm over "who consumes me" counts. When a cycle is present the queue
+         * drains early, so the remainder is appended in discovery order — a plan with a loop cannot
+         * be ordered correctly by definition, and it is already flagged for the matrix engine.
+         */
+        private List<MfpRecipe> order() {
+            Map<String, Integer> consumers = new LinkedHashMap<>();
+            nodes.keySet().forEach(id -> consumers.put(id, 0));
+            for (Set<String> producers : dependsOn.values()) {
+                for (String producer : producers) {
+                    consumers.computeIfPresent(producer, (id, count) -> count + 1);
+                }
+            }
+
+            Deque<String> ready = new ArrayDeque<>();
+            nodes.keySet().stream().filter(id -> consumers.get(id) == 0).forEach(ready::addLast);
+
+            List<MfpRecipe> ordered = new ArrayList<>(nodes.size());
+            Set<String> emitted = new LinkedHashSet<>();
+            while (!ready.isEmpty()) {
+                String id = ready.removeFirst();
+                if (!emitted.add(id)) {
+                    continue;
+                }
+                ordered.add(nodes.get(id));
+                for (String producer : dependsOn.getOrDefault(id, Set.of())) {
+                    Integer left = consumers.computeIfPresent(producer, (key, count) -> count - 1);
+                    if (left != null && left == 0) {
+                        ready.addLast(producer);
+                    }
+                }
+            }
+
+            for (Map.Entry<String, MfpRecipe> entry : nodes.entrySet()) {
+                if (emitted.add(entry.getKey())) {
+                    ordered.add(entry.getValue());
+                }
+            }
+            return ordered;
+        }
+    }
+}

@@ -1,0 +1,36 @@
+modLoader = "javafml"
+loaderVersion = "[47,)"
+license = "${mod_license}"
+issueTrackerURL = "https://github.com/jackb/MFP/issues"
+
+[[mods]]
+    modId = "${mod_id}"
+    version = "${mod_version}"
+    displayName = "${mod_name}"
+    authors = "${mod_authors}"
+    description = '''
+${mod_description}
+'''
+
+[[dependencies.${mod_id}]]
+    modId = "forge"
+    mandatory = true
+    versionRange = "[47,)"
+    ordering = "NONE"
+    side = "BOTH"
+
+[[dependencies.${mod_id}]]
+    modId = "minecraft"
+    mandatory = true
+    versionRange = "[1.20.1,1.21)"
+    ordering = "NONE"
+    side = "BOTH"
+
+# GregTech is optional. MFP loads without it; the gtceu integration simply stays dormant.
+# `ordering = AFTER` matters: GregTech must have registered its recipe types before MFP indexes.
+[[dependencies.${mod_id}]]
+    modId = "gtceu"
+    mandatory = false
+    versionRange = "[1.7,)"
+    ordering = "AFTER"
+    side = "BOTH"

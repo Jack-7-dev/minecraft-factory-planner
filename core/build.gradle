@@ -1,0 +1,64 @@
+// mfp-core: the domain model, recipe index and solvers.
+//
+// P1 (see the plan): this module MUST NOT reference Minecraft, Forge or GregTech.
+// It is plain Java so both solvers can be unit-tested in milliseconds without a game.
+// The `checkNoMinecraftImports` task below enforces that mechanically.
+
+dependencies {
+    compileOnly 'org.jetbrains:annotations:24.1.0'
+
+    // Gson, and it is the only library `core` touches. M9 needs the plan codec in `core` — the
+    // export string and the saved file must be the same JSON or the two formats drift — and a
+    // codec is not something to hand-write. It is `compileOnly` because Minecraft itself ships
+    // gson, so nothing is added to the mod jar; it is not a game class, so the P1 guard below is
+    // untouched. Anything else in `core` still gets no dependencies at all.
+    compileOnly 'com.google.code.gson:gson:2.10.1'
+    testImplementation 'com.google.code.gson:gson:2.10.1'
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+def forbiddenPackages = [
+        'net.minecraft',
+        'net.minecraftforge',
+        'net.neoforged',
+        'com.gregtechceu',
+        'com.startechnology',
+        'com.lowdragmc',
+        'dev.emi',
+        'mezz.jei',
+]
+
+tasks.register('checkNoMinecraftImports') {
+    description = 'Fails if mfp-core references any game or mod class (plan P1).'
+    group = 'verification'
+
+    def sourceDirs = sourceSets.main.java.srcDirs
+    inputs.files(sourceSets.main.java.asFileTree)
+
+    doLast {
+        def violations = []
+        sourceDirs.each { dir ->
+            if (!dir.exists()) return
+            dir.eachFileRecurse { file ->
+                if (!file.name.endsWith('.java')) return
+                file.eachLine { line, number ->
+                    forbiddenPackages.each { pkg ->
+                        if (line =~ /(^|[^\w.])\Q${pkg}\E\./) {
+                            violations << "${file.name}:${number} references ${pkg}"
+                        }
+                    }
+                }
+            }
+        }
+        if (!violations.isEmpty()) {
+            throw new GradleException(
+                    "mfp-core must stay free of game/mod classes (plan P1):\n  " +
+                            violations.join('\n  '))
+        }
+    }
+}
+
+tasks.named('check') { dependsOn 'checkNoMinecraftImports' }

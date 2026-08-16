@@ -1,0 +1,141 @@
+plugins {
+    id 'net.neoforged.moddev.legacyforge' version "${moddevgradle_version}"
+}
+
+base {
+    archivesName = "${mod_id}-${minecraft_version}"
+}
+
+legacyForge {
+    version = "${minecraft_version}-${forge_version}"
+
+    parchment {
+        minecraftVersion = project.parchment_minecraft
+        mappingsVersion = project.parchment_version
+    }
+
+    runs {
+        configureEach {
+            gameDirectory = project.file('run')
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            systemProperty 'forge.logging.console.level', 'debug'
+        }
+        client {
+            client()
+        }
+        server {
+            server()
+            programArguments.addAll('--nogui')
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet sourceSets.main
+            // mfp-core is a separate Gradle module, so its classes are not part of this source set
+            // and a dev run would not see them. Declaring it here puts it in the same mod as the
+            // rest of MFP, matching how it is shipped: folded into the mod jar, not a library.
+            sourceSet project(':core').sourceSets.main
+        }
+    }
+}
+
+repositories {
+    // GregTech Modern - StarT Fork. Its own publishing target (repo.expandium.net) no longer
+    // serves com.gregtechceu.* — the group is simply absent from the repo tree — so the fork is
+    // built from the sibling checkout instead:
+    //
+    //     cd ../GTM-StarT-Fork && ./gradlew publishToMavenLocal
+    //
+    // That produces com.gregtechceu.gtceu:gtceu-st-1.20.1:<mod_version> locally.
+    mavenLocal {
+        content {
+            includeGroup 'com.gregtechceu.gtceu'
+            includeGroup 'com.startechnology.start_core'
+        }
+    }
+    maven {
+        name = 'expandiumReleases'
+        url = 'https://repo.expandium.net/releases'
+        content {
+            includeGroup 'com.tterrag.registrate'
+        }
+    }
+    maven {
+        name = 'firstdarkSnapshots'
+        url = 'https://maven.firstdark.dev/snapshots'
+        content { includeGroup 'com.lowdragmc.ldlib' }
+    }
+    maven {
+        name = 'Registrate'
+        url = 'https://maven.tterrag.com/'
+    }
+    maven {
+        name = 'BlameJared'
+        url = 'https://maven.blamejared.com/'
+    }
+    maven {
+        name = 'TerraformersMC'
+        url = 'https://maven.terraformersmc.com/'
+    }
+    maven {
+        name = 'CurseMaven'
+        url = 'https://cursemaven.com/'
+        content { includeGroup 'curse.maven' }
+    }
+}
+
+dependencies {
+    implementation project(':core')
+
+    // GregTech is a soft dependency: MFP loads and runs without it, and the gtceu integration
+    // package is only touched when ModList reports it present (see MfpMod#isGregTechLoaded).
+    //
+    // These must be `modCompileOnly`, not `compileOnly`. Published mod jars are reobfuscated to
+    // SRG names; the `mod*` configurations remap them back to official mappings so we compile
+    // against the same names our own sources use. Plain `compileOnly` would silently give us
+    // SRG-named members and fail at runtime.
+    //
+    // `transitive = false` because the fork publishes a slim jar whose POM lists its whole dev
+    // classpath; we only need the GregTech classes themselves.
+    modCompileOnly("com.gregtechceu.gtceu:gtceu-st-${minecraft_version}:${gtceu_version}") { transitive = false }
+    modCompileOnly("com.lowdragmc.ldlib:ldlib-forge-${minecraft_version}:${ldlib_version}") { transitive = false }
+    modCompileOnly("com.tterrag.registrate:Registrate:${registrate_version}") { transitive = false }
+
+    // Dev runtime. Toggle with `-PwithGregTech=false` to launch a plain client, which is useful
+    // for checking that MFP really is independent of GregTech.
+    //
+    // Only GregTech is listed. Its published jar bundles Registrate, dev.toma.configuration, LDLib
+    // and mixinextras under META-INF/jarjar/, and Forge's jar-in-jar loader picks those up, so
+    // naming them here as well would put two copies of each on the mod path.
+    if (project.findProperty('withGregTech') != 'false') {
+        modRuntimeOnly("com.gregtechceu.gtceu:gtceu-st-${minecraft_version}:${gtceu_version}") { transitive = false }
+    }
+}
+
+// `implementation project(':core')` is not on the mod runtime classpath by default under
+// ModDevGradle, so fold the core classes into the jar.
+tasks.named('jar', Jar) {
+    from(project(':core').sourceSets.main.output)
+}
+
+// Let the dedicated server read console commands from the terminal, so `/mfp index` and friends can
+// be driven without a client — including non-interactively, by piping commands in.
+tasks.matching { it.name == 'runServer' }.configureEach {
+    standardInput = System.in
+}
+
+tasks.named('processResources', ProcessResources) {
+    def replacements = [
+            mod_id         : project.mod_id,
+            mod_name       : project.mod_name,
+            mod_version    : project.mod_version,
+            mod_license    : project.mod_license,
+            mod_authors    : project.mod_authors,
+            mod_description: project.mod_description,
+    ]
+    inputs.properties(replacements)
+    filesMatching(['META-INF/mods.toml', 'pack.mcmeta']) {
+        expand replacements
+    }
+}
