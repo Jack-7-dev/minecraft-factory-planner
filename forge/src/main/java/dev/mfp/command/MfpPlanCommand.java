@@ -92,6 +92,18 @@ public final class MfpPlanCommand {
                         .executes(ctx -> resolve(ctx.getSource(),
                                 StringArgumentType.getString(ctx, "item")))));
 
+        // Pinning a specific recipe, which /mfp resolve cannot do: it answers an import with the
+        // scorer's own top choice, and the recipe worth investigating is usually not that one. Every
+        // machine-behaviour bug so far has been found by making one named recipe run on one named
+        // machine and reading the working — the Large Chemical Reactor's missing overclock could
+        // only be reached headlessly by editing the standing-defaults file, which is a poor
+        // substitute for a command (STATUS §14).
+        root.then(Commands.literal("pin")
+                .executes(ctx -> pins(ctx.getSource()))
+                .then(Commands.argument("spec", StringArgumentType.greedyString())
+                        .executes(ctx -> pin(ctx.getSource(),
+                                StringArgumentType.getString(ctx, "spec")))));
+
         root.then(Commands.literal("solver")
                 .then(Commands.argument("mode", StringArgumentType.word())
                         .executes(ctx -> solver(ctx.getSource(),
@@ -268,6 +280,85 @@ public final class MfpPlanCommand {
         }
         send(source, "MFP: answered " + answered.size() + " import(s)", ChatFormatting.GREEN);
         answered.forEach(line -> send(source, "  " + line, ChatFormatting.GRAY));
+        return choose(source, index, plan);
+    }
+
+    /** {@code /mfp pin} — what this plan has been told to use. */
+    private static int pins(CommandSourceStack source) {
+        PlanSession session = PlanSession.of(source.getTextName());
+        if (session == null) {
+            send(source, "MFP: no plan yet - run /mfp plan first", ChatFormatting.RED);
+            return 0;
+        }
+        Map<MfpKey, String> choices = session.plan().recipeChoices();
+        if (choices.isEmpty()) {
+            send(source, "MFP: no pinned recipes in this plan", ChatFormatting.GRAY);
+            send(source, "  /mfp pin <item> <recipe id>   pin one, and re-solve", ChatFormatting.GRAY);
+            send(source, "  /mfp pin clear [item]         drop one, or all of them", ChatFormatting.GRAY);
+            return 1;
+        }
+        send(source, choices.size() + " pinned recipe(s)", ChatFormatting.GOLD);
+        choices.forEach((key, recipeId) ->
+                send(source, "  " + KeySpec.of(key) + " <- " + recipeId, ChatFormatting.WHITE));
+        return 1;
+    }
+
+    /**
+     * {@code /mfp pin <item> <recipe id>}, and {@code /mfp pin clear [item]}.
+     *
+     * <p>One greedy argument split on whitespace rather than two arguments, because brigadier's
+     * word reader stops at a colon and every id here has one.
+     *
+     * <p>The recipe is checked against the item before it is stored. A pin that names a recipe not
+     * producing what it is pinned to does nothing at all when the walk reaches it — the chooser
+     * falls through to the scorer, exactly as it does for a pin left stale by a pack update — and a
+     * silent no-op is the worst possible answer to a diagnostic command.
+     */
+    private static int pin(CommandSourceStack source, String spec) {
+        PlanSession session = PlanSession.of(source.getTextName());
+        if (session == null) {
+            send(source, "MFP: no plan to pin into - run /mfp plan first", ChatFormatting.RED);
+            return 0;
+        }
+        RecipeIndex index = MfpIndexHolder.get(source.getServer());
+        Plan plan = session.plan();
+        String[] parts = spec.trim().split("\\s+");
+
+        if (parts[0].equalsIgnoreCase("clear")) {
+            if (parts.length == 1) {
+                int had = plan.recipeChoices().size();
+                plan.recipeChoices().keySet().forEach(plan::clearRecipeChoice);
+                send(source, "MFP: cleared " + had + " pin(s)", ChatFormatting.GREEN);
+            } else {
+                MfpKey key = parseKey(parts[1]);
+                plan.clearRecipeChoice(key);
+                send(source, "MFP: cleared the pin on " + KeySpec.of(key), ChatFormatting.GREEN);
+            }
+            return choose(source, index, plan);
+        }
+
+        if (parts.length < 2) {
+            send(source, "MFP: /mfp pin <item> <recipe id>, or /mfp pin clear [item]",
+                    ChatFormatting.RED);
+            return 0;
+        }
+
+        MfpKey key = parseKey(parts[0]);
+        String recipeId = parts[1];
+        MfpRecipe recipe = index.recipe(recipeId);
+        if (recipe == null) {
+            send(source, "MFP: no indexed recipe with id '" + recipeId + "'", ChatFormatting.RED);
+            return 0;
+        }
+        if (!recipe.produces(key)) {
+            send(source, "MFP: " + recipeId + " does not produce " + KeySpec.of(key)
+                    + " - it makes " + recipe.outputs().stream().map(o -> KeySpec.of(o.key())).toList(),
+                    ChatFormatting.RED);
+            return 0;
+        }
+
+        plan.chooseRecipe(key, recipeId);
+        send(source, "MFP: pinned " + KeySpec.of(key) + " <- " + recipeId, ChatFormatting.GREEN);
         return choose(source, index, plan);
     }
 
