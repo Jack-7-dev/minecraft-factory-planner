@@ -2,6 +2,7 @@ package dev.mfp.core.behaviour;
 
 import dev.mfp.core.behaviour.gt.BatchModeBehaviour;
 import dev.mfp.core.behaviour.gt.CoilOverclockBehaviour;
+import dev.mfp.core.behaviour.gt.CoilTierOverclockBehaviour;
 import dev.mfp.core.behaviour.gt.ElectricOverclockBehaviour;
 import dev.mfp.core.behaviour.gt.GeneratorBehaviour;
 import dev.mfp.core.behaviour.gt.LargeTurbineBehaviour;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Decides which behaviours apply to a machine, and in what order.
@@ -61,6 +63,11 @@ public final class BehaviourRegistry {
         registry.register(ElectricOverclockBehaviour.nonPerfectSubTick());
         registry.register(ElectricOverclockBehaviour.perfectSubTick());
         registry.register(new CoilOverclockBehaviour());
+        // The three coil multiblocks that are not the blast furnace. Their overclock comes from the
+        // energy hatch like anything else's; the coil only scales it.
+        registry.register(CoilTierOverclockBehaviour.chemicalReactor());
+        registry.register(CoilTierOverclockBehaviour.cracker());
+        registry.register(CoilTierOverclockBehaviour.pyrolyseOven());
         registry.register(new ParallelHatchBehaviour("parallel_hatch"));
         registry.register(new BatchModeBehaviour());
 
@@ -127,16 +134,64 @@ public final class BehaviourRegistry {
         return List.copyOf(all);
     }
 
-    /** Modifier ids the machine declares that nothing in this registry understands. */
-    public List<String> unknownModifiers(BehaviourContext context) {
+    /**
+     * Modifiers deliberately treated as no-ops, rather than ones nothing has been written for.
+     *
+     * <p>The distinction is the whole value of {@link #unknownModifiers}: a warning that fires on
+     * modifiers MFP has already decided are irrelevant is a warning the user learns to scroll past,
+     * and then the one that matters goes past with it.
+     *
+     * <ul>
+     *   <li>{@code default_environment_requirement} — identity unless the machine is standing in a
+     *       pollution zone, which is a property of where it was built and not of the plan.
+     *   <li>{@code consume_eu_to_start} — a one-off charge to begin a recipe. It changes what the
+     *       machine needs buffered, never its rate.
+     * </ul>
+     *
+     * <p>Both are in GregTech's own {@code GTRecipeModifiers.ignoreModifiers}, which is where the
+     * game decides they are not worth showing the player either.
+     */
+    private static final Set<String> NEUTRAL_MODIFIERS =
+            Set.of("default_environment_requirement", "consume_eu_to_start");
+
+    /**
+     * Named modifiers the machine declares that nothing in this registry models.
+     *
+     * <p>Not the same as "no behaviours applied". A machine whose list is <em>half</em> understood is
+     * the dangerous case, because the chain is non-empty and the answer therefore looks confident:
+     * the Large Chemical Reactor declares
+     * {@code [default_environment_requirement, chemical_reactor_oc, batch_mode]}, and while
+     * {@code chemical_reactor_oc} was unimplemented MFP applied batch mode, reported EXACT, and
+     * quietly ignored the machine's entire overclock — so changing the energy hatch did nothing to
+     * the plan. See STATUS §14.
+     *
+     * <p><b>Named only</b>, and that restriction is what makes the warning worth reading.
+     * {@code GtMachineCatalog} gives a modifier passed as a bare method reference the id
+     * {@code lambda:<declaring class>}, which is stable but ambiguous by construction — many rules
+     * share one — and says in as many words that no behaviour may match on it. A large share of
+     * GregTech's single blocks carry one: the plain chemical reactor is
+     * {@code [lambda:GTRecipeModifiers, oc_non_perfect]}. Flagging those would put a warning on a
+     * good fraction of every plan, and a warning that common is one the user stops reading — at
+     * which point the {@code chemical_reactor_oc}-shaped ones go past unread too. Anonymous
+     * modifiers are the shape matcher's job; a name nothing answers to is a gap someone can close.
+     */
+    public List<String> unmodelledModifiers(BehaviourContext context) {
         List<String> unknown = new ArrayList<>();
         for (String modifierId : context.modifierIds()) {
+            if (NEUTRAL_MODIFIERS.contains(modifierId) || isAnonymous(modifierId)) {
+                continue;
+            }
             MachineBehaviour behaviour = byModifierId.get(modifierId);
             if (behaviour == null || !behaviour.appliesTo(context)) {
                 unknown.add(modifierId);
             }
         }
         return unknown;
+    }
+
+    /** Ids {@code GtMachineCatalog} minted because the modifier had no name of its own. */
+    private static boolean isAnonymous(String modifierId) {
+        return modifierId.startsWith("lambda:") || modifierId.startsWith("js:");
     }
 
     /**

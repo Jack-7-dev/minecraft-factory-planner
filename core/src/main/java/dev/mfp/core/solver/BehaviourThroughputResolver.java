@@ -89,7 +89,20 @@ public final class BehaviourThroughputResolver implements ThroughputResolver {
     public ThroughputResult resolveResult(MfpRecipe recipe, MachineConfig config) {
         BehaviourContext context = contextFor(recipe, config);
         List<MachineBehaviour> chain = registry.chainFor(context);
-        return BehaviourChain.fold(chain, context);
+        ThroughputResult result = BehaviourChain.fold(chain, context);
+
+        // A modifier nothing implements is an unknown quantity, and it has to be said even when the
+        // rest of the chain ran — especially then. `BehaviourChain.fold` can only see that its list
+        // is non-empty, so a half-understood machine came out of it marked EXACT: that is how the
+        // Large Chemical Reactor spent its whole existence ignoring the energy hatch without a word
+        // of warning (STATUS §14). The registry is the only thing that knows what was skipped.
+        List<String> unknown = registry.unmodelledModifiers(context);
+        if (!unknown.isEmpty() && !result.cancelled()) {
+            return result.degrade(Confidence.UNKNOWN,
+                    "nothing models " + String.join(", ", unknown) + ", so that part of this "
+                            + "machine's behaviour is missing from the rate");
+        }
+        return result;
     }
 
     /** The behaviours that will be applied, in order — the other half of an explanation. */

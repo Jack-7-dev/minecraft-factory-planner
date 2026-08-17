@@ -21,6 +21,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -473,5 +474,157 @@ class BehaviourChainTest {
             assertEquals(20.0 / 3, capped.craftsPerSecond(), TOLERANCE, "tier " + tier);
             assertEquals(4 * 64 * 20.0, capped.euInPerSecond(), TOLERANCE, "tier " + tier);
         }
+    }
+
+    // ------------------------------------------- the other coil multiblocks (STATUS 14)
+
+    private static MfpRecipe reactorRecipe(int durationTicks, long eut) {
+        return MfpRecipe.builder("test:sulfuric_acid", "gtceu:large_chemical_reactor", "test")
+                .input(MfpIngredient.of(DUST, 1))
+                .output(MfpOutput.of(INGOT, 1))
+                .duration(durationTicks)
+                .euIn(eut)
+                .minTier(3)
+                .build();
+    }
+
+    private static MfpMachine reactor(String... modifiers) {
+        return new MfpMachine("gtceu:large_chemical_reactor", "LCR", -1, 0,
+                List.of("gtceu:large_chemical_reactor"), true, List.of(modifiers), "test");
+    }
+
+    /**
+     * The bug this behaviour was written for: the hatch did nothing at all.
+     *
+     * <p>{@code chemical_reactor_oc} was unimplemented, so the Large Chemical Reactor's chain was
+     * {@code batch_mode} alone — and batch mode is throughput-neutral. Every hatch from HV upwards
+     * therefore produced the same machine count, which is what the player saw in game.
+     */
+    @Test
+    @DisplayName("the large chemical reactor speeds up with its energy hatch")
+    void chemicalReactorOverclocksOnTheHatch() {
+        MfpMachine lcr = reactor("default_environment_requirement", "chemical_reactor_oc", "batch_mode");
+        BehaviourThroughputResolver resolver = resolver(lcr);
+        // The pack's sulfuric acid recipe: 320 ticks at 480 EU/t, which is HV.
+        MfpRecipe recipe = reactorRecipe(320, 480);
+
+        // Kanthal is the coil tier at which the speed factor is exactly 1, so this isolates the
+        // overclock. HV runs it at the recipe's own voltage: no overclock, 320 ticks.
+        Throughput hv = resolver.resolve(recipe, MachineConfig.of(lcr.id(), 3)
+                .withOption(GtCoils.OPTION_COIL, "kanthal"));
+        assertEquals(0, hv.overclocks());
+        assertEquals(20.0 / 320, hv.craftsPerSecond(), TOLERANCE);
+
+        // Non-perfect, so a tier is a halving rather than a quartering: EV is 2x, IV is 4x.
+        Throughput ev = resolver.resolve(recipe, MachineConfig.of(lcr.id(), 4)
+                .withOption(GtCoils.OPTION_COIL, "kanthal"));
+        assertEquals(1, ev.overclocks());
+        assertEquals(20.0 / 160, ev.craftsPerSecond(), TOLERANCE);
+
+        Throughput iv = resolver.resolve(recipe, MachineConfig.of(lcr.id(), 5)
+                .withOption(GtCoils.OPTION_COIL, "kanthal"));
+        assertEquals(20.0 / 80, iv.craftsPerSecond(), TOLERANCE);
+        assertEquals(2 * hv.craftsPerSecond(), ev.craftsPerSecond(), TOLERANCE);
+        assertEquals(4 * hv.craftsPerSecond(), iv.craftsPerSecond(), TOLERANCE);
+    }
+
+    /**
+     * And it keeps scaling, because this one is the sub-tick variant.
+     *
+     * <p>The contrast with {@code perfectOverclockingIsFasterAndThenCapped} is the whole reason both
+     * tests exist: the Large Macerator stops dead at the one-tick floor, the Large Chemical Reactor
+     * spends what is left on parallelism and carries on.
+     */
+    @Test
+    @DisplayName("and past one tick it buys parallels rather than stopping")
+    void chemicalReactorKeepsScalingPastTheTickFloor() {
+        MfpMachine lcr = reactor("chemical_reactor_oc");
+        BehaviourThroughputResolver resolver = resolver(lcr);
+        MfpRecipe recipe = reactorRecipe(320, 480);
+
+        MachineConfig deep = MachineConfig.of(lcr.id(), 12).withOption(GtCoils.OPTION_COIL, "kanthal");
+        Throughput throughput = resolver.resolve(recipe, deep);
+
+        // Nine overclocks against 320 ticks. Eight of them are halvings the duration can absorb -
+        // and the seventh lands on 2.5, which the game runs in 2 (§13), so the chain arrives at one
+        // tick with a quarter more speed than the arithmetic promises. The ninth has nowhere to go
+        // and becomes a second parallel rather than being thrown away, which is what separates this
+        // machine from the Large Macerator above: 40 crafts a second, not 32 and not a cap.
+        assertEquals(40.0, throughput.craftsPerSecond(), TOLERANCE);
+        assertTrue(throughput.note().contains("parallel"), throughput.note());
+    }
+
+    @Test
+    @DisplayName("the coil sets speed and energy, and cupronickel is a penalty")
+    void chemicalReactorCoilsScaleSpeedAndEnergy() {
+        MfpMachine lcr = reactor("chemical_reactor_oc");
+        BehaviourThroughputResolver resolver = resolver(lcr);
+        MfpRecipe recipe = reactorRecipe(300, 480);
+
+        // 75% speed on cupronickel: 300 ticks becomes 400, and the energy is undiscounted.
+        Throughput cupronickel = resolver.resolve(recipe, MachineConfig.of(lcr.id(), 3)
+                .withOption(GtCoils.OPTION_COIL, "cupronickel"));
+        assertEquals(20.0 / 400, cupronickel.craftsPerSecond(), TOLERANCE);
+        assertEquals(480 * 20.0, cupronickel.euInPerSecond(), TOLERANCE);
+
+        // Nichrome is tier 2: 125% speed, and 10% off the energy.
+        Throughput nichrome = resolver.resolve(recipe, MachineConfig.of(lcr.id(), 3)
+                .withOption(GtCoils.OPTION_COIL, "nichrome"));
+        assertEquals(20.0 / 240, nichrome.craftsPerSecond(), TOLERANCE);
+        assertEquals(480 * 0.9 * 20.0, nichrome.euInPerSecond(), TOLERANCE);
+    }
+
+    /**
+     * The coil is a build choice the plan may not have made, and unlike the blast furnace it cannot
+     * stop the recipe running — so the overclock is still answered and only the coil is assumed.
+     */
+    @Test
+    @DisplayName("an unset coil assumes cupronickel and says so, rather than refusing")
+    void chemicalReactorWithoutACoilAssumesTheWorstOne() {
+        MfpMachine lcr = reactor("chemical_reactor_oc");
+        Throughput throughput = resolver(lcr).resolve(reactorRecipe(300, 480),
+                MachineConfig.of(lcr.id(), 3));
+
+        assertEquals(20.0 / 400, throughput.craftsPerSecond(), TOLERANCE);
+        assertEquals(Confidence.APPROXIMATE, throughput.confidence());
+        assertTrue(throughput.note().contains("cupronickel"), throughput.note());
+    }
+
+    /**
+     * The fault underneath the fault: a half-understood machine reported EXACT.
+     *
+     * <p>{@code BehaviourChain.fold} only sees that its list is non-empty, so batch mode alone was
+     * enough to make the reactor look fully modelled. The registry is the only thing that can tell.
+     */
+    @Test
+    @DisplayName("a modifier nothing models is reported, even when the rest of the chain ran")
+    void anUnmodelledModifierIsNotSilent() {
+        MfpMachine odd = reactor("batch_mode", "some_pack_modifier");
+        Throughput throughput = resolver(odd).resolve(reactorRecipe(320, 480),
+                MachineConfig.of(odd.id(), 3));
+
+        assertEquals(Confidence.UNKNOWN, throughput.confidence());
+        assertTrue(throughput.note().contains("some_pack_modifier"), throughput.note());
+    }
+
+    /**
+     * And the counterweight: the warning has to stay rare enough to be read.
+     *
+     * <p>{@code lambda:...} is the id {@code GtMachineCatalog} mints for a modifier passed as a bare
+     * method reference, and a large share of GregTech's single blocks carry one — the plain chemical
+     * reactor is {@code [lambda:GTRecipeModifiers, oc_non_perfect]}. Warning on those would put a
+     * notice on a good fraction of every plan, and the one that matters would go past unread.
+     */
+    @Test
+    @DisplayName("an anonymous modifier is not reported, nor is a known no-op")
+    void anonymousAndNeutralModifiersStaySilent() {
+        MfpMachine plain = macerator("gtceu:hv_macerator", false, 3,
+                "lambda:com.gregtechceu.gtceu.common.data.GTRecipeModifiers", "oc_non_perfect",
+                "consume_eu_to_start");
+        Throughput throughput = resolver(plain).resolve(maceratorRecipe(200, 4),
+                MachineConfig.of(plain.id(), 3));
+
+        assertEquals(Confidence.EXACT, throughput.confidence());
+        assertNull(throughput.note());
     }
 }
