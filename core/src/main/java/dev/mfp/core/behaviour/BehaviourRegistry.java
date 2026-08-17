@@ -65,9 +65,12 @@ public final class BehaviourRegistry {
         registry.register(new CoilOverclockBehaviour());
         // The three coil multiblocks that are not the blast furnace. Their overclock comes from the
         // energy hatch like anything else's; the coil only scales it.
-        registry.register(CoilTierOverclockBehaviour.chemicalReactor());
-        registry.register(CoilTierOverclockBehaviour.cracker());
-        registry.register(CoilTierOverclockBehaviour.pyrolyseOven());
+        for (CoilTierOverclockBehaviour coilTier : List.of(
+                CoilTierOverclockBehaviour.chemicalReactor(),
+                CoilTierOverclockBehaviour.cracker(),
+                CoilTierOverclockBehaviour.pyrolyseOven())) {
+            registry.register(coilTier, coilTier.modifierIds());
+        }
         registry.register(new ParallelHatchBehaviour("parallel_hatch"));
         registry.register(new BatchModeBehaviour());
 
@@ -99,6 +102,22 @@ public final class BehaviourRegistry {
 
     public BehaviourRegistry register(MachineBehaviour behaviour) {
         byModifierId.put(behaviour.id(), behaviour);
+        return this;
+    }
+
+    /**
+     * Register one behaviour under several ids — the same rule spelled more than one way.
+     *
+     * <p>Not a convenience. GregTech is a moving target and MFP compiles against one build of a
+     * fork while the pack ships another, so a modifier can be renamed underneath us: 1.7.0's
+     * {@code pyrolize_oven_oc} became 1.7.0b's {@code pyrolyse_oven_oc}. Keying on a single spelling
+     * means the behaviour keeps working in the dev run and stops working in the pack, silently,
+     * which is strictly worse than never having written it.
+     */
+    public BehaviourRegistry register(MachineBehaviour behaviour, List<String> modifierIds) {
+        for (String modifierId : modifierIds) {
+            byModifierId.put(modifierId, behaviour);
+        }
         return this;
     }
 

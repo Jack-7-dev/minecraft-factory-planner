@@ -686,4 +686,43 @@ class BehaviourChainTest {
         assertEquals(10, GtCoils.tierOf("abyssal_alloy"));
         assertEquals(-1, GtCoils.tierOf("no_such_coil"));
     }
+
+    /**
+     * The pyrolyse oven under the spelling the shipped pack actually uses.
+     *
+     * <p>GTCEu-ST 1.7.0 calls this modifier {@code pyrolize_oven_oc} and 1.7.0b calls it
+     * {@code pyrolyse_oven_oc}. MFP compiles against the latter and Star-Technology ships the
+     * former, so matching one spelling gave a behaviour that passed every test here and applied to
+     * nothing in the game the user plays. Both spellings must reach the same rule, and this asserts
+     * they produce the identical answer rather than merely that neither is unknown.
+     */
+    @Test
+    @DisplayName("the pyrolyse oven is found under either spelling of its modifier id")
+    void pyrolyseOvenAnswersToBothSpellings() {
+        MfpRecipe recipe = reactorRecipe(320, 120);
+
+        MfpMachine corrected = oven("pyrolyse_oven_oc");
+        MfpMachine shipped = oven("pyrolize_oven_oc");
+
+        Throughput a = resolver(corrected).resolve(recipe, MachineConfig.of(corrected.id(), 3)
+                .withOption(GtCoils.OPTION_COIL, "kanthal"));
+        Throughput b = resolver(shipped).resolve(recipe, MachineConfig.of(shipped.id(), 3)
+                .withOption(GtCoils.OPTION_COIL, "kanthal"));
+
+        assertEquals(a.craftsPerSecond(), b.craftsPerSecond(), TOLERANCE);
+        assertEquals(a.euInPerSecond(), b.euInPerSecond(), TOLERANCE);
+        assertEquals(a.confidence(), b.confidence());
+
+        // And the shared answer is the oven's, not the fallback's. A 120 EU/t recipe on a tier-3
+        // hatch buys exactly one non-perfect overclock (120 x 4 = 480, still inside HV's 512, and a
+        // second would need 1920), halving 320 to 160; kanthal is tier 1, so the coil factor that
+        // follows is 2/(1+1) = 1 and leaves it there. Running the recipe as written would give 320.
+        assertEquals(Confidence.EXACT, b.confidence());
+        assertEquals(20.0 / 160, b.craftsPerSecond(), TOLERANCE);
+    }
+
+    private static MfpMachine oven(String modifierId) {
+        return new MfpMachine("gtceu:pyrolyse_oven", "Pyrolyse Oven", -1, 0,
+                List.of("gtceu:pyrolyse_oven"), true, List.of(modifierId), "test");
+    }
 }

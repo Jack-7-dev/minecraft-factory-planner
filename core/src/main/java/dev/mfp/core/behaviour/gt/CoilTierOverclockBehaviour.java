@@ -46,14 +46,17 @@ import java.util.function.IntToDoubleFunction;
 public final class CoilTierOverclockBehaviour implements MachineBehaviour {
 
     private final String modifierId;
+    private final List<String> aliases;
     private final IntToDoubleFunction durationFactor;
     private final IntToDoubleFunction eutFactor;
     private final boolean durationBeforeOverclock;
     private final String coilEffect;
 
-    private CoilTierOverclockBehaviour(String modifierId, IntToDoubleFunction durationFactor,
+    private CoilTierOverclockBehaviour(String modifierId, List<String> aliases,
+            IntToDoubleFunction durationFactor,
             IntToDoubleFunction eutFactor, boolean durationBeforeOverclock, String coilEffect) {
         this.modifierId = modifierId;
+        this.aliases = List.copyOf(aliases);
         this.durationFactor = durationFactor;
         this.eutFactor = eutFactor;
         this.durationBeforeOverclock = durationBeforeOverclock;
@@ -68,7 +71,7 @@ public final class CoilTierOverclockBehaviour implements MachineBehaviour {
      * tooltip states it in exactly those terms.
      */
     public static CoilTierOverclockBehaviour chemicalReactor() {
-        return new CoilTierOverclockBehaviour("chemical_reactor_oc",
+        return new CoilTierOverclockBehaviour("chemical_reactor_oc", List.of(),
                 tier -> 1.0 / (0.75 + tier * 0.25),
                 tier -> 1.0 - tier * 0.05,
                 true,
@@ -77,7 +80,7 @@ public final class CoilTierOverclockBehaviour implements MachineBehaviour {
 
     /** The Cracking Unit: coils discount energy only, 10% per tier. */
     public static CoilTierOverclockBehaviour cracker() {
-        return new CoilTierOverclockBehaviour("cracker_oc",
+        return new CoilTierOverclockBehaviour("cracker_oc", List.of(),
                 tier -> 1.0,
                 // The high end is the fork's own curve, which flattens rather than reaching free.
                 tier -> Math.max(0.0001, 1.0 - (tier > 9 ? 0.9 + (tier - 9) * 0.025 : tier * 0.1)),
@@ -85,9 +88,20 @@ public final class CoilTierOverclockBehaviour implements MachineBehaviour {
                 "a 10%-per-tier energy discount");
     }
 
-    /** The Pyrolyse Oven: coils change speed only, and cupronickel is a penalty. */
+    /**
+     * The Pyrolyse Oven: coils change speed only, and cupronickel is a penalty.
+     *
+     * <p>Registered under both spellings of its id, and that is not defensive programming. GTCEu-ST
+     * 1.7.0 — the build Star-Technology actually ships — names this modifier
+     * {@code pyrolize_oven_oc}; 1.7.0b, the sibling checkout MFP compiles against, corrects it to
+     * {@code pyrolyse_oven_oc}. Matching only the corrected spelling made this behaviour work
+     * perfectly in the dev run and do <em>nothing</em> in the pack, which is the worst possible
+     * place for the difference to fall: every check passed and every plan the player saw was wrong.
+     * Found by {@code /mfp modifiers}, which reported the behaviour as registered-but-unused and the
+     * pack's id as unmodelled in the same breath.
+     */
     public static CoilTierOverclockBehaviour pyrolyseOven() {
-        return new CoilTierOverclockBehaviour("pyrolyse_oven_oc",
+        return new CoilTierOverclockBehaviour("pyrolyse_oven_oc", List.of("pyrolize_oven_oc"),
                 tier -> tier == 0 ? 4.0 / 3.0 : 2.0 / (tier + 1),
                 tier -> 1.0,
                 false,
@@ -99,9 +113,22 @@ public final class CoilTierOverclockBehaviour implements MachineBehaviour {
         return modifierId;
     }
 
+    /** Every id this rule is known by, the canonical one first. */
+    public List<String> modifierIds() {
+        List<String> all = new java.util.ArrayList<>();
+        all.add(modifierId);
+        all.addAll(aliases);
+        return List.copyOf(all);
+    }
+
     @Override
     public boolean appliesTo(BehaviourContext context) {
-        return context.hasModifier(modifierId);
+        for (String id : modifierIds()) {
+            if (context.hasModifier(id)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
