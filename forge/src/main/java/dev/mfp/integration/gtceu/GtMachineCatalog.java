@@ -173,12 +173,12 @@ final class GtMachineCatalog {
     private static String stableId(RecipeModifier modifier) {
         String className = modifier.getClass().getName();
 
-        // A modifier written in the pack's own scripts. Rhino compiles the arrow function to an
-        // adapter class called "$proxy153", and the number is a per-launch counter — so recording it
-        // verbatim would give every saved plan and behaviour override a key that stops matching after
-        // a restart, which is the same trap as the lambda names above. There is nothing to read
-        // inside it either way, so all of them collapse to one honest id.
-        if (className.startsWith("$proxy") || className.contains(".$proxy")) {
+        // A modifier written in the pack's own scripts. Rhino compiles the arrow function to a proxy
+        // class called "$proxy153", and the number is a per-launch counter — so recording it verbatim
+        // would give every saved plan and behaviour override a key that stops matching after a
+        // restart, which is the same trap as the lambda names above. There is nothing to read inside
+        // it either way, so all of them collapse to one honest id.
+        if (isGeneratedProxy(className)) {
             return "js:script-defined";
         }
         int lambda = className.indexOf("$$Lambda");
@@ -189,13 +189,45 @@ final class GtMachineCatalog {
         }
         try {
             String id = modifier.getId();
+            // Checked again, because getId() defaults to the simple class name and a proxy the test
+            // above did not recognise arrives here wearing it. gtceu:steam_kiln reached the
+            // behaviour table as "$proxy139" this way, and a modifier id carrying a per-launch
+            // counter is worse than no id: it looks specific, it is unmatchable, and it changes
+            // every boot. Whatever spelling the proxy machinery picks, it must not get through.
             if (id != null && !id.isBlank()) {
-                return id;
+                return isGeneratedProxy(id) ? "js:script-defined" : id;
             }
         } catch (RuntimeException ignored) {
             // Fall through: the class name is still a usable, stable identifier.
         }
         return className;
+    }
+
+    /**
+     * Whether a class or id name is a runtime-generated proxy, and therefore per-launch garbage.
+     *
+     * <p>Matched on the shape {@code $proxy<digits>} rather than on an exact prefix, because the
+     * name is chosen by whichever machinery built the proxy and there are several: Rhino's own
+     * adapters, {@code java.lang.reflect.Proxy} (which produces {@code jdk.proxy1.$Proxy139}, with a
+     * capital P and a package in front), and the simple name of either. The one thing they share is
+     * a counter, which is exactly what makes them unusable as identifiers — so the counter is what
+     * this looks for.
+     */
+    private static boolean isGeneratedProxy(String name) {
+        int proxy = name.toLowerCase(Locale.ROOT).lastIndexOf("$proxy");
+        if (proxy < 0) {
+            return false;
+        }
+        String tail = name.substring(proxy + "$proxy".length());
+        if (tail.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < tail.length(); i++) {
+            if (!Character.isDigit(tail.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Resolved constant names per declaring class, since one class holds many machines' modifiers. */
