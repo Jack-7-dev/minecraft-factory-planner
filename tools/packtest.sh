@@ -22,7 +22,12 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER="$(cd "$REPO/.." && pwd)/packtest"
 INSTANCE="/c/Users/jackb/curseforge/minecraft/Instances/Star Technology THETA"
 JAVA="/c/Program Files/Java/jdk-17/bin/java"
-JAR="mfp-1.20.1-0.1.0.jar"
+# Read from gradle.properties rather than written here. It was hardcoded, and the version bump to
+# 2.1.0 left this pointing at a jar the build no longer produces - so the copy below silently did
+# nothing and every run tested the stale artifact still sitting in the server's mods folder, which
+# is precisely the failure the comment further down warns about.
+MOD_VERSION="$(sed -n 's/^[[:space:]]*mod_version=//p' "$REPO/gradle.properties" | tr -d '[:space:]')"
+JAR="mfp-1.20.1-${MOD_VERSION}.jar"
 BOOT_TIMEOUT="${PACKTEST_TIMEOUT:-900}"
 
 # Mods that cannot run on a dedicated server. Kept as a list rather than discovered every run: each
