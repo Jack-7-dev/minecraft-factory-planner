@@ -98,6 +98,44 @@ class BehaviourChainTest {
         assertEquals(1, throughput.overclocks());
     }
 
+    /**
+     * The discount must not buy an overclock, however far it drops the EU/t.
+     *
+     * <p>GregTech writes this as {@code oc.compose(discount)}, which reads as "discount first" — but
+     * {@code oc} was already built from the <em>raw</em> recipe, because {@code getModifier} reads
+     * EU/t at construction time to decide how many overclocks there are. The two multipliers commute
+     * so the final EU/t is the same either way; the overclock <em>count</em> is not.
+     *
+     * <p>It bites hardest where the answer matters most. The discount compounds at 0.95 per 900 K of
+     * surplus, so a hot coil reaches 0.735 — far more than enough to drop a recipe a voltage tier and
+     * hand the furnace an overclock the game never gives it. 130 EU/t is HV by a margin of two; three
+     * discount steps put it at 111, which is MV, and MFP used to overclock accordingly.
+     */
+    @Test
+    @DisplayName("the coil discount does not buy an overclock the hatch cannot pay for")
+    void blastFurnaceDiscountDoesNotBuyAnOverclock() {
+        MfpMachine ebf = machine("gtceu:electric_blast_furnace", true, -1, "ebf_oc");
+        MfpRecipe recipe = MfpRecipe.builder("test:edge_blast", "gtceu:electric_blast_furnace", "test")
+                .input(MfpIngredient.of(DUST, 1))
+                .output(MfpOutput.of(INGOT, 1))
+                .duration(400)
+                .euIn(130)
+                .minTier(3)
+                .extra("gtceu:ebf_temp", 1000)
+                .build();
+        // Nichrome at 3600 K plus 100 K for the HV hatch: 2700 K of surplus is three discount steps.
+        MachineConfig config = MachineConfig.of(ebf.id(), 3)
+                .withOption(GtCoils.OPTION_COIL, "nichrome");
+
+        Throughput throughput = resolver(ebf).resolve(recipe, config);
+
+        // An HV recipe in an HV furnace: no headroom, so no overclock and the duration is untouched.
+        assertEquals(0, throughput.overclocks());
+        assertEquals(20.0 / 400, throughput.craftsPerSecond(), TOLERANCE);
+        // The discount still applies in full - it is only the overclock it must not pay for.
+        assertEquals(130 * Math.pow(0.95, 3) * 20, throughput.euInPerSecond(), TOLERANCE);
+    }
+
     @Test
     @DisplayName("EBF rejects a recipe its coils cannot reach")
     void blastFurnaceRejectsColdCoils() {
