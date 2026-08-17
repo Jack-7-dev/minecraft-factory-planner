@@ -178,7 +178,7 @@ public final class BehaviourRegistry {
     public List<String> unmodelledModifiers(BehaviourContext context) {
         List<String> unknown = new ArrayList<>();
         for (String modifierId : context.modifierIds()) {
-            if (NEUTRAL_MODIFIERS.contains(modifierId) || isAnonymous(modifierId)) {
+            if (statusOf(modifierId) != ModifierStatus.UNMODELLED) {
                 continue;
             }
             MachineBehaviour behaviour = byModifierId.get(modifierId);
@@ -187,6 +187,41 @@ public final class BehaviourRegistry {
             }
         }
         return unknown;
+    }
+
+    /** What this registry knows about a modifier id, before any machine or recipe is involved. */
+    public enum ModifierStatus {
+        /** A behaviour is registered under this id. Whether it applies is the context's business. */
+        MODELLED,
+        /** Deliberately a no-op: see {@link #NEUTRAL_MODIFIERS}. */
+        NEUTRAL,
+        /** A lambda or script rule with no name to match on; the shape matcher's job. */
+        ANONYMOUS,
+        /** A named rule nothing here answers to — a gap someone can close. */
+        UNMODELLED
+    }
+
+    /**
+     * Classify one modifier id without a machine or a recipe.
+     *
+     * <p>Coverage is a property of the registry and the pack, not of any one plan, so answering it
+     * needs to be possible by walking the machine catalog alone — which is what {@code /mfp
+     * modifiers} does. Asking the question per plan finds only the gaps a player happens to walk
+     * into, and the gaps that matter most are on the machines nobody has planned with yet.
+     */
+    public ModifierStatus statusOf(String modifierId) {
+        if (NEUTRAL_MODIFIERS.contains(modifierId)) {
+            return ModifierStatus.NEUTRAL;
+        }
+        if (isAnonymous(modifierId)) {
+            return ModifierStatus.ANONYMOUS;
+        }
+        return byModifierId.containsKey(modifierId) ? ModifierStatus.MODELLED : ModifierStatus.UNMODELLED;
+    }
+
+    /** Ids a behaviour is registered under, for reporting what coverage exists. */
+    public Set<String> modelledIds() {
+        return Set.copyOf(byModifierId.keySet());
     }
 
     /** Ids {@code GtMachineCatalog} minted because the modifier had no name of its own. */

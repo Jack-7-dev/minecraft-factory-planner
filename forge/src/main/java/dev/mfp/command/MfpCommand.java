@@ -67,6 +67,11 @@ public final class MfpCommand {
                         .executes(ctx -> reportMachine(ctx.getSource(),
                                 StringArgumentType.getString(ctx, "id")))));
 
+        // Which of the game's recipe modifiers MFP actually models. A coverage audit rather than an
+        // inspection: it is the only thing here that can find a missing behaviour before a plan
+        // silently reports the wrong number for it.
+        MfpModifiersCommand.register(root);
+
         // Planning, explanation and the recipe picker's ranked list.
         MfpPlanCommand.register(root);
 
