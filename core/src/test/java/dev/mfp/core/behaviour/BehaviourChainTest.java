@@ -274,8 +274,8 @@ class BehaviourChainTest {
 
         Throughput throughput = resolver(threaded).resolve(plainRecipe(), config);
 
-        // Duration x 1/8, one parallel, so 8x the rate.
-        assertEquals(20.0 / 12.5, throughput.craftsPerSecond(), TOLERANCE);
+        // Duration x 1/8, one parallel: 100 ticks becomes 12.5, which the game runs in 12.
+        assertEquals(20.0 / 12, throughput.craftsPerSecond(), TOLERANCE);
         // 30 efficiency points halve the draw: 30 / (30 + 30).
         assertEquals(30 * 0.5 * 20, throughput.euInPerSecond(), TOLERANCE);
     }
@@ -373,5 +373,105 @@ class BehaviourChainTest {
 
         assertEquals(0.0, throughput.euInPerSecond(), TOLERANCE);
         assertEquals(30.0 * 20 * 1.0, throughput.steamPerSecond(), TOLERANCE);
+    }
+
+    // ------------------------------------------------- whole ticks (STATUS 15)
+
+    /**
+     * Shaped like {@code gtceu:macerator/macerate_aluminium_refined_ore_to_dust}: 400 ticks at
+     * 2 EU/t, which is ULV, so a deep overclock drives the duration under two ticks.
+     */
+    private static MfpRecipe maceratorRecipe(int durationTicks, long eut) {
+        return MfpRecipe.builder("test:macerate", "gtceu:macerator", "test")
+                .input(MfpIngredient.of(DUST, 1))
+                .output(MfpOutput.of(INGOT, 1))
+                .duration(durationTicks)
+                .euIn(eut)
+                .minTier(0)
+                .build();
+    }
+
+    private static MfpMachine macerator(String id, boolean multiblock, int tier, String... modifiers) {
+        return new MfpMachine(id, id, tier, GtTiers.voltage(tier),
+                List.of("gtceu:macerator"), multiblock, List.of(modifiers), "test");
+    }
+
+    /**
+     * A machine cannot run for a fraction of a tick.
+     *
+     * <p>{@code GTRecipe.duration} is an {@code int} and every modifier truncates it, so the
+     * arithmetic's 1.5625 ticks is 1 tick in the game — a 56% difference in throughput, and the one
+     * place where a plan built at UV stopped matching what the machine actually did.
+     */
+    @Test
+    @DisplayName("a duration below two ticks truncates to one, not to the fraction")
+    void deepOverclocksRunInWholeTicks() {
+        MfpMachine uhv = macerator("gtceu:uhv_macerator", false, 9, "oc_non_perfect");
+
+        // 400 ticks, eight overclocks: 400 x 0.5^8 = 1.5625, which the game runs in 1.
+        Throughput throughput = resolver(uhv).resolve(maceratorRecipe(400, 2),
+                MachineConfig.of(uhv.id(), 9));
+
+        assertEquals(8, throughput.overclocks());
+        assertEquals(20.0 / 1, throughput.craftsPerSecond(), TOLERANCE);
+    }
+
+    @Test
+    @DisplayName("and a duration between three and four ticks truncates to three")
+    void shallowerOverclocksTruncateToo() {
+        MfpMachine uv = macerator("gtceu:uv_macerator", false, 8, "oc_non_perfect");
+
+        // 400 x 0.5^7 = 3.125.
+        Throughput throughput = resolver(uv).resolve(maceratorRecipe(400, 2),
+                MachineConfig.of(uv.id(), 8));
+
+        assertEquals(20.0 / 3, throughput.craftsPerSecond(), TOLERANCE);
+    }
+
+    @Test
+    @DisplayName("a duration that divides exactly is left alone")
+    void exactDurationsAreUntouched() {
+        MfpMachine hv = macerator("gtceu:hv_macerator", false, 3, "oc_non_perfect");
+
+        // 200 ticks, 4 EU/t is ULV so one overclock is spent leaving it: 200 x 0.5^2 = 50.
+        Throughput throughput = resolver(hv).resolve(maceratorRecipe(200, 4),
+                MachineConfig.of(hv.id(), 3));
+
+        assertEquals(2, throughput.overclocks());
+        assertEquals(20.0 / 50, throughput.craftsPerSecond(), TOLERANCE);
+    }
+
+    /**
+     * The pack's Large Macerator, which is the machine that exposed all of this: {@code oc_perfect}
+     * quarters the duration per overclock instead of halving it, so it reaches the one-tick floor
+     * two tiers earlier than an ordinary macerator and then stops dead, because it is not the
+     * sub-tick variant and has nothing to spend the remaining overclocks on.
+     */
+    @Test
+    @DisplayName("perfect overclocking is four times faster and stops where duration runs out")
+    void perfectOverclockingIsFasterAndThenCapped() {
+        MfpMachine large = macerator("gtceu:t_large_macerator", true, -1, "oc_perfect", "batch_mode");
+        MfpMachine plain = macerator("gtceu:macerator", false, 3, "oc_non_perfect");
+        BehaviourThroughputResolver resolver = resolver(large, plain);
+        MfpRecipe recipe = maceratorRecipe(200, 4);
+
+        // HV: two overclocks either way. 200 x 0.25^2 = 12.5, truncated to 12, against 50.
+        Throughput hv = resolver.resolve(recipe, MachineConfig.of(large.id(), 3));
+        assertEquals(20.0 / 12, hv.craftsPerSecond(), TOLERANCE);
+        assertEquals(20.0 / 50, resolver.resolve(recipe, MachineConfig.of(plain.id(), 3))
+                .craftsPerSecond(), TOLERANCE);
+
+        // EV buys a third overclock: 200 x 0.25^3 = 3.125, truncated to 3.
+        assertEquals(20.0 / 3, resolver.resolve(recipe, MachineConfig.of(large.id(), 4))
+                .craftsPerSecond(), TOLERANCE);
+
+        // A fourth would be 0.78 ticks, so IV and LuV hatches buy nothing at all — and are not
+        // charged for either, because the loop breaks before it raises the voltage.
+        for (int tier = 5; tier <= 6; tier++) {
+            Throughput capped = resolver.resolve(recipe, MachineConfig.of(large.id(), tier));
+            assertEquals(3, capped.overclocks(), "tier " + tier);
+            assertEquals(20.0 / 3, capped.craftsPerSecond(), TOLERANCE, "tier " + tier);
+            assertEquals(4 * 64 * 20.0, capped.euInPerSecond(), TOLERANCE, "tier " + tier);
+        }
     }
 }

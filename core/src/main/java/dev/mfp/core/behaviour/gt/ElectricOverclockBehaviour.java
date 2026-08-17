@@ -89,7 +89,9 @@ public final class ElectricOverclockBehaviour implements MachineBehaviour {
 
         long maxVoltage = context.machineVoltage();
         double currentEut = accumulated.eut(recipeEut);
-        int currentDuration = (int) Math.max(1, Math.round(
+        // Truncated, not rounded — see CoilOverclockBehaviour. GregTech's int duration is the input
+        // to the loop, and rounding up can manufacture an overclock the machine never gets.
+        int currentDuration = (int) Math.max(1, Math.floor(
                 accumulated.durationTicks(context.recipe().durationTicks())));
 
         int overclocks = OverclockMaths.overclockCount((long) currentEut, maxVoltage);

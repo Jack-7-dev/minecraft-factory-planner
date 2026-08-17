@@ -64,7 +64,7 @@ forge/   the mod: recipe providers, GregTech integration, commands and the inter
 
 **`core` contains no game imports at all**, and a build task enforces it. That is what lets the maths
 be tested in about a second with no Minecraft on the classpath, and it means a GregTech update cannot
-break the solver. 218 tests cover it.
+break the solver. 222 tests cover it.
 
 A few conventions run through everything: every rate is per second, recipe amounts are per craft,
 machine counts stay fractional until they are displayed, energy flows through the solver as though it

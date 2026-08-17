@@ -99,7 +99,10 @@ public final class CoilOverclockBehaviour implements MachineBehaviour {
 
         long maxVoltage = context.machineVoltage();
         double currentEut = discounted.eut(recipeEut);
-        int currentDuration = (int) Math.max(1, Math.round(
+        // Truncated, not rounded: GregTech hands the overclock loop an int duration that a previous
+        // modifier already truncated, and 3.9 ticks going in as 4 rather than 3 can buy an
+        // overclock the machine does not actually get.
+        int currentDuration = (int) Math.max(1, Math.floor(
                 discounted.durationTicks(context.recipe().durationTicks())));
 
         int overclocks = OverclockMaths.overclockCount((long) currentEut, maxVoltage);
