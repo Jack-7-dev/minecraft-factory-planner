@@ -1,11 +1,13 @@
 package dev.mfp.index;
 
+import dev.mfp.behaviour.BehaviourConfig;
 import dev.mfp.core.index.RecipeIndex;
 import dev.mfp.provider.CollectionContext;
 import dev.mfp.provider.ProviderRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -51,9 +53,36 @@ public final class LazyIndex {
                 return RecipeIndex.EMPTY;
             }
             index = ProviderRegistry.collectAll(ctx);
+            warnAboutUnmodelledModifiers(index);
             stale = false;
         }
         return index;
+    }
+
+    /**
+     * Say so in the log when the loaded game carries a recipe modifier nothing models.
+     *
+     * <p>Here, rather than left to {@code /mfp modifiers}, because of how the worst instance of this
+     * was found. MFP compiles against one build of the GregTech fork and runs inside a pack shipping
+     * another; a pack update renamed {@code pyrolyse_oven_oc} to {@code pyrolize_oven_oc} underneath
+     * a behaviour written for it, and nothing said anything, because nothing was looking. The plans
+     * were flagged UNKNOWN, correctly — but only the ones somebody happened to build (STATUS §14a).
+     *
+     * <p>A coverage gap that only a command reveals is a gap nobody sees until they think to look,
+     * and the moment it appears is precisely the moment nobody is looking: a version bump. One WARN
+     * per index build costs nothing and fires on the first world load after the update.
+     */
+    private void warnAboutUnmodelledModifiers(RecipeIndex built) {
+        List<String> unmodelled =
+                BehaviourConfig.loadRegistry().unmodelledIds(built.machines());
+        if (unmodelled.isEmpty()) {
+            return;
+        }
+        LOGGER.warn("MFP {} index: {} recipe modifier(s) in this game have no behaviour, so"
+                        + " machines using them report an UNKNOWN rate: {}."
+                        + " Run /mfp modifiers to see which machines, and note that a modifier"
+                        + " renamed by an update looks exactly like this.",
+                side, unmodelled.size(), String.join(", ", unmodelled));
     }
 
     /** Force a rebuild on next use. Called whenever the game's recipes may have changed. */

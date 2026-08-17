@@ -19,12 +19,15 @@ import dev.mfp.core.behaviour.startcore.ThreadingBehaviour;
 import dev.mfp.core.behaviour.startcore.ThroughputBoostingBehaviour;
 import dev.mfp.core.behaviour.startcore.VacuumChamberBehaviour;
 import dev.mfp.core.model.Confidence;
+import dev.mfp.core.model.MfpMachine;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Decides which behaviours apply to a machine, and in what order.
@@ -249,6 +252,29 @@ public final class BehaviourRegistry {
     /** Ids a behaviour is registered under, for reporting what coverage exists. */
     public Set<String> modelledIds() {
         return Set.copyOf(byModifierId.keySet());
+    }
+
+    /**
+     * Every named modifier in a machine catalog that nothing here answers to, sorted and distinct.
+     *
+     * <p>Cheap enough to run on every index build, which is the point: a coverage gap that only a
+     * command reveals is a gap nobody sees until they think to look, and the gap that mattered most
+     * so far appeared when a <em>pack update</em> renamed a modifier under us. Something has to
+     * notice that without being asked.
+     */
+    public List<String> unmodelledIds(Collection<MfpMachine> machines) {
+        Set<String> unmodelled = new TreeSet<>();
+        for (MfpMachine machine : machines) {
+            if (machine == null || machine.modifierIds() == null) {
+                continue;
+            }
+            for (String modifierId : machine.modifierIds()) {
+                if (statusOf(modifierId) == ModifierStatus.UNMODELLED) {
+                    unmodelled.add(modifierId);
+                }
+            }
+        }
+        return List.copyOf(unmodelled);
     }
 
     /** Ids {@code GtMachineCatalog} minted because the modifier had no name of its own. */
