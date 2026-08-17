@@ -292,6 +292,28 @@ class MatrixSolverTest {
         assertEquals(2.0, result.byproducts().get(Fixtures.CRUSHED), TOLERANCE);
     }
 
+    /**
+     * A line says which part of its own production the plan wanted.
+     *
+     * <p>The engine cannot know that while it solves — surplus is a property of the balanced plan —
+     * but it can say so afterwards, and it has to. Listing every output as a product while the
+     * Byproducts tab called most of them surplus was the same plan answering the same question two
+     * ways depending on where you looked.
+     */
+    @Test
+    void aLineSeparatesWhatWasWantedFromWhatWasLeftOver() {
+        Plan plan = new Plan("shared byproduct").target(Fixtures.GRAVEL, 1.0);
+        plan.add(new Line(Fixtures.gravelFromStoneDust()));
+        plan.add(new Line(Fixtures.crushedWithByproduct()));
+
+        LineResult crushing = solver.solve(plan).lines().get(1);
+
+        assertEquals(1.0, crushing.outputs().get(STONE_DUST), TOLERANCE,
+                "the dust is why this line is here: the gravel line eats all of it");
+        assertNull(crushing.outputs().get(Fixtures.CRUSHED), "nothing in the plan wants crushed ore");
+        assertEquals(2.0, crushing.byproducts().get(Fixtures.CRUSHED), TOLERANCE);
+    }
+
     /** Catalysts are netted out before the system is built, so they never appear as flows. */
     @Test
     void aBorrowedCatalystNeverEntersTheSystem() {

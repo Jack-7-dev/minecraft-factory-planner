@@ -584,16 +584,6 @@ public final class MatrixSolver {
                     Map.of(), Map.of(), Map.of(), Confidence.EXACT, line.reason()));
         }
 
-        // Report in the plan's own order. The matrix does not care about it, but the user reads the
-        // same list they built, and /mfp explain addresses lines by number.
-        List<LineResult> results = new ArrayList<>(byLine.size());
-        for (Line line : order) {
-            LineResult result = byLine.get(line);
-            if (result != null) {
-                results.add(result);
-            }
-        }
-
         Map<MfpKey, Double> rawInputs = new LinkedHashMap<>();
         Map<MfpKey, Double> byproducts = new LinkedHashMap<>();
         Map<MfpKey, Double> products = new LinkedHashMap<>();
@@ -630,6 +620,20 @@ public final class MatrixSolver {
             warnings.add("targets not fully satisfied: " + unsatisfied.keySet());
         }
 
+        // Only now is it known what the plan does not consume, so only now can a line say which part
+        // of its production was wanted.
+        SurplusAttribution.apply(byLine, byproducts);
+
+        // Report in the plan's own order. The matrix does not care about it, but the user reads the
+        // same list they built, and /mfp explain addresses lines by number.
+        List<LineResult> results = new ArrayList<>(byLine.size());
+        for (Line line : order) {
+            LineResult result = byLine.get(line);
+            if (result != null) {
+                results.add(result);
+            }
+        }
+
         return new SolveResult(results, byLine, products, rawInputs, byproducts, unsatisfied,
                 euIn, euOut, steamIn, confidence, warnings, SolverMode.MATRIX);
     }
@@ -654,10 +658,9 @@ public final class MatrixSolver {
             inputs.merge(MfpKey.EU, throughput.fixedEuPerSecond(), Double::sum);
         }
 
-        // Byproducts are left empty on purpose. "Demanded here, surplus there" is a distinction the
-        // sequential walk makes because it satisfies demand line by line; the matrix balances the
-        // whole plan at once, so what is surplus is a property of the plan, not of a line. The
-        // plan-level byproduct list is the meaningful answer and it comes from the free variables.
+        // Everything the line makes goes under outputs for now. The matrix balances the whole plan at
+        // once, so which part of this was surplus is not known until the free variables are read;
+        // SurplusAttribution splits it afterwards.
         return new LineResult(column.line(), rate, machineCount,
                 throughput.euInPerSecond() * machineCount + throughput.fixedEuPerSecond(),
                 throughput.euOutPerSecond() * machineCount,

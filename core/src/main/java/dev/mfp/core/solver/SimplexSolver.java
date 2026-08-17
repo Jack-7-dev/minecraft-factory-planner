@@ -526,16 +526,6 @@ public final class SimplexSolver {
                     Map.of(), Map.of(), Map.of(), Confidence.EXACT, line.reason()));
         }
 
-        // Report in the plan's own order: the user reads the same list they built, and /mfp explain
-        // addresses lines by number.
-        List<LineResult> results = new ArrayList<>(byLine.size());
-        for (Line line : plan.allLines()) {
-            LineResult result = byLine.get(line);
-            if (result != null) {
-                results.add(result);
-            }
-        }
-
         Map<MfpKey, Double> rawInputs = new LinkedHashMap<>();
         Map<MfpKey, Double> byproducts = new LinkedHashMap<>();
         Map<MfpKey, Double> products = new LinkedHashMap<>();
@@ -585,6 +575,20 @@ public final class SimplexSolver {
             }
         }
 
+        // Only now is it known what the plan does not consume, so only now can a line say which part
+        // of its production was wanted.
+        SurplusAttribution.apply(byLine, byproducts);
+
+        // Report in the plan's own order: the user reads the same list they built, and /mfp explain
+        // addresses lines by number.
+        List<LineResult> results = new ArrayList<>(byLine.size());
+        for (Line line : plan.allLines()) {
+            LineResult result = byLine.get(line);
+            if (result != null) {
+                results.add(result);
+            }
+        }
+
         return new SolveResult(results, byLine, products, rawInputs, byproducts, unsatisfied,
                 euIn, euOut, steamIn, confidence, warnings, SolverMode.SIMPLEX);
     }
@@ -613,9 +617,9 @@ public final class SimplexSolver {
         if (rate <= ItemFlows.EPSILON && note == null) {
             note = "nothing in the plan needs what this line makes";
         }
-        // Byproducts are left empty for the same reason the matrix engine leaves them empty: what is
-        // surplus is a property of the whole plan, not of one line, and the plan-level list is the
-        // meaningful answer.
+        // Everything the line makes goes under outputs for now, as in the matrix engine: what is
+        // surplus is not known until the leftover columns are read, and SurplusAttribution splits it
+        // afterwards.
         return new LineResult(column.line(), rate, machineCount,
                 throughput.euInPerSecond() * machineCount + throughput.fixedEuPerSecond(),
                 throughput.euOutPerSecond() * machineCount,

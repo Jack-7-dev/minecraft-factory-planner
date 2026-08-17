@@ -664,7 +664,7 @@ public final class PlannerScreen extends Screen {
                     machineCountCell(result, throughput),
                     energyCell(result),
                     Cells.flows(slotsFor(result.outputs(), divisor)),
-                    byproductCell(result, solved.engine(), divisor),
+                    byproductCell(result, divisor),
                     // The one column whose flows lead somewhere: an ingredient is a question about
                     // where it comes from, and clicking it is how the chain is built out (M11.2).
                     Cells.flows(ingredientSlots(result.inputs(), divisor, solved))
@@ -782,11 +782,10 @@ public final class PlannerScreen extends Screen {
      * than mis-aimed.
      *
      * <p>The solved line already knows: {@code outputs()} is production something demanded, and
-     * {@code byproducts()} is production nothing asked for. Where the engine does not make that split
-     * — the matrix engine balances the plan as a whole, so every output lands in {@code outputs()} —
-     * an output another line consumes, or that the plan targets, is the one that was wanted. Only
-     * when nothing distinguishes them does this fall back to the largest, which is the old
-     * behaviour and right for a single-output recipe.
+     * {@code byproducts()} is production nothing asked for. Where that leaves more than one
+     * candidate, an output another line consumes, or that the plan targets, is the one that was
+     * wanted. Only when nothing distinguishes them does this fall back to the largest, which is the
+     * old behaviour and right for a single-output recipe.
      */
     private MfpKey producedFor(MfpRecipe recipe, LineResult result) {
         if (result != null && !result.outputs().isEmpty()) {
@@ -893,14 +892,14 @@ public final class PlannerScreen extends Screen {
         return Cells.text("-", Theme.TEXT_IDLE);
     }
 
-    private Table.Cell byproductCell(LineResult result, SolverMode engine, double divisor) {
-        if (result.byproducts().isEmpty() && engine.closesLoops()) {
-            // Not "this line has no byproducts" — a whole-plan engine does not attribute surplus to
-            // a line at all, and letting an empty cell imply otherwise would be a quiet lie.
-            return Cells.text("-", Theme.TEXT_IDLE,
-                    List.of(Component.literal("This engine balances the plan as a whole, so surplus "
-                            + "is a property of the plan rather than of a line.").withStyle(ChatFormatting.GRAY),
-                            Component.literal("See the Byproducts tab.").withStyle(ChatFormatting.GRAY)));
+    private Table.Cell byproductCell(LineResult result, double divisor) {
+        if (result.byproducts().isEmpty()) {
+            // Now a plain statement of fact under every engine. It used to carry a disclaimer, because
+            // the whole-plan engines put a line's entire production under outputs and left this column
+            // empty whether or not the plan wanted it — so a distillation tower making eight fluids
+            // for the sake of one called all eight products here while the Byproducts tab called seven
+            // of them surplus. The engines attribute it per line now.
+            return Cells.text("-", Theme.TEXT_IDLE);
         }
         return Cells.flows(slotsFor(result.byproducts(), divisor));
     }
