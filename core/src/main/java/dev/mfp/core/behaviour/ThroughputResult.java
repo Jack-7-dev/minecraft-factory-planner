@@ -127,6 +127,38 @@ public record ThroughputResult(
         return Math.max(1.0, baseDurationTicks * durationMultiplier);
     }
 
+    /**
+     * Round the accumulated duration down to a whole tick, as GregTech does after every modifier.
+     *
+     * <p>Not a cosmetic rounding. {@code GTRecipe.duration} is an {@code int}, and every modifier
+     * application writes {@code duration = max(1, (int) (duration * multiplier))} — a truncation,
+     * not a round. A machine cannot run for 1.5625 ticks; it runs for one, and the recipe finishes
+     * 56% sooner than the arithmetic suggests.
+     *
+     * <p>The error is invisible on long recipes and dominates short ones, so it lands exactly where
+     * deep overclocks put every recipe: a macerator recipe at UV computes to 1.5625 ticks and runs
+     * in 1, which is the difference between planning 1.6 machines and planning 1.
+     *
+     * <p>Always in the machine's favour, so the old behaviour over-stated machine counts rather than
+     * under-stating them — but "conservative" is not "correct", and a planner that cannot be checked
+     * against the game is not much of a planner.
+     *
+     * <p>A non-integral base duration is left alone. GregTech durations are always whole ticks, so a
+     * fractional one means a synthesised recipe that is not on this clock at all.
+     */
+    public ThroughputResult quantiseDuration(double baseDurationTicks) {
+        if (cancelled || baseDurationTicks <= 0 || baseDurationTicks != Math.floor(baseDurationTicks)) {
+            return this;
+        }
+        double exact = baseDurationTicks * durationMultiplier;
+        double whole = Math.max(1.0, Math.floor(exact));
+        if (whole == exact) {
+            return this;
+        }
+        return new ThroughputResult(whole / baseDurationTicks, eutMultiplier, contentMultiplier,
+                overclocks, steamPerEu, false, null, confidence, notes);
+    }
+
     /** EU/t after modifiers. */
     public double eut(double baseEut) {
         return baseEut * eutMultiplier;

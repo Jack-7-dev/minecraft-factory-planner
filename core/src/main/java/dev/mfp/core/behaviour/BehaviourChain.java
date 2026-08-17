@@ -35,6 +35,11 @@ public final class BehaviourChain {
             if (result.cancelled()) {
                 return result;
             }
+            // Once per behaviour, not once at the end. GregTech's fold writes a whole new GTRecipe
+            // between modifiers and its duration is an int, so the truncation happens as many times
+            // as there are modifiers — and the next behaviour reads the truncated figure, which is
+            // what decides its own overclocks and whether batch mode engages at all.
+            result = result.quantiseDuration(context.recipe().durationTicks());
         }
         return result;
     }
