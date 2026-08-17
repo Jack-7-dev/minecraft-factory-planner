@@ -68,6 +68,12 @@ public final class Preferences {
      * solver balances what is there, which is how Factory Planner has always worked — and automatic
      * expansion is a per-plan opt-in until it can be trusted to find a good chain of ten steps.
      *
+     * <p>"By hand" does not mean "one line". {@link #defaultRecipes()} are the user's own decisions,
+     * so expansion follows them down as far as they go and stops only where the next answer would
+     * have to be the scorer's — which makes the import list exactly the set of items they have never
+     * decided about, and makes a well-populated defaults file into a chain that builds itself
+     * without ever guessing.
+     *
      * <p>A standing preference rather than a constant because it is a judgement that will change:
      * when the chooser is good enough (`PLAN.md` §13a) this flips back, and no saved plan has to
      * move for it to. A plan that states its own answer keeps it either way — {@link Plan#autoResolve}

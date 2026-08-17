@@ -90,32 +90,40 @@ public final class CoilOverclockBehaviour implements MachineBehaviour {
         }
 
         double discount = OverclockMaths.coilEutDiscount(recipeTemp, machineTemp);
-        ThroughputResult discounted = accumulated.andThen(1.0, discount, 1.0, 0);
 
         if (!context.hasMachineVoltage()) {
-            return discounted.degrade(Confidence.UNKNOWN,
+            return accumulated.andThen(1.0, discount, 1.0, 0).degrade(Confidence.UNKNOWN,
                     "no machine tier chosen, so no overclock is modelled");
         }
 
         long maxVoltage = context.machineVoltage();
-        double currentEut = discounted.eut(recipeEut);
+        // The UNDISCOUNTED EU/t, which is the whole subtlety of this modifier. GregTech writes it
+        // as oc.compose(discount) — the discount is applied to the recipe first — but `oc` was
+        // already built from the *raw* recipe by getModifier, which reads its EU/t at construction
+        // time to decide the overclock count. So the final EU/t is the same either way, since the
+        // two multipliers commute, but the number of overclocks is not: the discount compounds at
+        // 0.95 per 900 K of surplus and reaches 0.735 on naquadah coils, which is more than enough
+        // to drop the recipe a voltage tier. Overclocking the discounted figure hands the furnace a
+        // free overclock the game never gives it, and does so exactly on the hottest coils, where
+        // the answer matters most.
+        double currentEut = accumulated.eut(recipeEut);
         // Truncated, not rounded: GregTech hands the overclock loop an int duration that a previous
         // modifier already truncated, and 3.9 ticks going in as 4 rather than 3 can buy an
         // overclock the machine does not actually get.
         int currentDuration = (int) Math.max(1, Math.floor(
-                discounted.durationTicks(context.recipe().durationTicks())));
+                accumulated.durationTicks(context.recipe().durationTicks())));
 
         int overclocks = OverclockMaths.overclockCount((long) currentEut, maxVoltage);
         if (overclocks <= 0) {
-            return discounted;
+            return accumulated.andThen(1.0, discount, 1.0, 0);
         }
 
         OverclockMaths.Result result = OverclockMaths.heatingCoil((long) currentEut, currentDuration,
                 overclocks, overclocks, maxVoltage, recipeTemp, machineTemp,
                 OverclockMaths.subTickParallelCeiling(currentDuration, overclocks));
 
-        ThroughputResult folded = discounted.andThen(result.durationMultiplier(), result.eutMultiplier(),
-                result.parallels(), result.baseOverclocks());
+        ThroughputResult folded = accumulated.andThen(result.durationMultiplier(),
+                result.eutMultiplier() * discount, result.parallels(), result.baseOverclocks());
 
         int perfect = Math.min(result.overclocks(),
                 OverclockMaths.coilDiscountSteps(recipeTemp, machineTemp) / 2);

@@ -41,16 +41,47 @@ public final class GtCoils {
 
     /** Temperature for a coil name, or -1 when the name is not one this table knows. */
     public static int temperatureOf(String coilName) {
-        if (coilName == null) {
+        String key = normalise(coilName);
+        return key == null ? -1 : TEMPERATURES.getOrDefault(key, -1);
+    }
+
+    /**
+     * The coil's <em>tier</em> — its position in the table, cupronickel being 0 — or -1 if unknown.
+     *
+     * <p>A second reading of the same list, because GregTech uses both and they are not
+     * interchangeable. The blast furnace cares only about kelvin; the chemical reactor, cracking
+     * unit and pyrolyse oven scale on {@code CoilType.getTier()}, which is the enum ordinal and has
+     * no arithmetic relationship to the temperature. Deriving one from the other would work today
+     * and break the first time a pack inserts a coil in the middle.
+     *
+     * <p>Order is therefore load-bearing here, which is what {@link LinkedHashMap} is for.
+     */
+    public static int tierOf(String coilName) {
+        String key = normalise(coilName);
+        if (key == null) {
             return -1;
         }
-        String key = coilName.toLowerCase(Locale.ROOT).trim();
-        int slash = key.lastIndexOf(':');
-        if (slash >= 0) {
-            key = key.substring(slash + 1);
+        int tier = 0;
+        for (String name : TEMPERATURES.keySet()) {
+            if (name.equals(key)) {
+                return tier;
+            }
+            tier++;
         }
-        key = key.replace("_coil_block", "").replace("_coil", "");
-        return TEMPERATURES.getOrDefault(key, -1);
+        return -1;
+    }
+
+    /** A coil name as the table spells it: no namespace, no {@code _coil} suffix, lower case. */
+    private static String normalise(String coilName) {
+        if (coilName == null) {
+            return null;
+        }
+        String key = coilName.toLowerCase(Locale.ROOT).trim();
+        int colon = key.lastIndexOf(':');
+        if (colon >= 0) {
+            key = key.substring(colon + 1);
+        }
+        return key.replace("_coil_block", "").replace("_coil", "");
     }
 
     public static Set<String> names() {

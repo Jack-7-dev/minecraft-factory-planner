@@ -8,6 +8,7 @@ import dev.mfp.core.model.MfpOutput;
 import dev.mfp.core.model.MfpRecipe;
 import dev.mfp.core.plan.Line;
 import dev.mfp.core.plan.Plan;
+import dev.mfp.core.plan.Preferences;
 import dev.mfp.core.plan.SolverMode;
 import dev.mfp.core.solver.SequentialSolver;
 import dev.mfp.core.solver.SolveResult;
@@ -897,6 +898,55 @@ class RecipeChooserTest {
 
         assertEquals(List.of("mfp:plate", "mfp:ingot"), ids(result));
         assertEquals(List.of(DUST), result.unresolved(), "one layer at a time, in order");
+    }
+
+    @Test
+    @DisplayName("hand-building fills in the chains the player has already defaulted")
+    void handBuildingFollowsStandingDefaults() {
+        RecipeIndex index = indexOf(
+                recipe("mfp:dust", ORE, 1, DUST, 1),
+                recipe("mfp:ingot", DUST, 1, INGOT, 1),
+                recipe("mfp:plate", INGOT, 1, PLATE, 1));
+
+        Preferences preferences = Preferences.none().defaultRecipe(INGOT, "mfp:ingot");
+        Plan plan = new Plan("by hand").target(PLATE, 1).rawMaterial(ORE).autoResolve(false);
+
+        ChooserResult result = new RecipeChooser(index, preferences).expand(plan);
+
+        // Identical to answering that import by hand: the decision was made once instead of here.
+        assertEquals(List.of("mfp:plate", "mfp:ingot"), ids(result));
+        assertEquals(List.of(DUST), result.unresolved(),
+                "and it stops where the defaults do, rather than carrying on with the scorer's guess");
+
+        // Default the next step too and the whole chain comes in, down to the raw material.
+        preferences.defaultRecipe(DUST, "mfp:dust");
+        ChooserResult deeper = new RecipeChooser(index, preferences).expand(plan);
+        assertEquals(List.of("mfp:plate", "mfp:ingot", "mfp:dust"), ids(deeper));
+        assertTrue(deeper.unresolved().isEmpty(), () -> "nothing left to answer: " + deeper.unresolved());
+    }
+
+    /**
+     * The one thing a standing default deliberately does not outrank, unlike a pin.
+     *
+     * <p>A pin is a statement about this plan and this item, so it wins over the plan's own raw list
+     * (see {@code aPinOutranksTheRawMaterialCutoff}). A default is a statement about every plan, and
+     * "I buy this one in" is the more specific of the two — a default that expanded a raw material
+     * would make the raw list appear to do nothing on exactly the item the user just added to it.
+     */
+    @Test
+    @DisplayName("a standing default does not expand an item this plan calls raw")
+    void aStandingDefaultDoesNotOutrankTheRawMaterialCutoff() {
+        RecipeIndex index = indexOf(
+                recipe("mfp:dust", ORE, 1, DUST, 1),
+                recipe("mfp:ingot", DUST, 1, INGOT, 1));
+
+        Preferences preferences = Preferences.none().defaultRecipe(DUST, "mfp:dust");
+        Plan plan = new Plan("bought-in dust").target(INGOT, 1).rawMaterial(DUST).autoResolve(false);
+
+        ChooserResult result = new RecipeChooser(index, preferences).expand(plan);
+
+        assertEquals(List.of("mfp:ingot"), ids(result));
+        assertTrue(result.unresolved().isEmpty(), "the dust is imported, not unanswered");
     }
 
     /**

@@ -358,8 +358,9 @@ public final class PlannerScreen extends Screen {
                 }).withOption(
                         () -> "Expansion: " + (automatic[0] ? "automatic" : "by hand"),
                         () -> automatic[0] = !automatic[0],
-                        "By hand adds only the recipe for what you asked for and leaves every "
-                                + "ingredient as a question you answer by clicking it. Automatic "
+                        "By hand adds the recipe for what you asked for, follows your default "
+                                + "recipes as far as they go, and leaves every ingredient past them "
+                                + "as a question you answer by clicking it. Automatic "
                                 + "picks the whole chain. Starts at your standing default, set in "
                                 + "Defaults, and this plan can be switched later in Settings.")));
         create.tooltip("Start another plan. Plans are saved with the world.");

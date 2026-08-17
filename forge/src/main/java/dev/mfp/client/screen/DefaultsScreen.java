@@ -100,9 +100,10 @@ public final class DefaultsScreen extends ModalScreen {
             preferences.autoResolve(!preferences.autoResolve());
             saveAndResolve();
         });
-        expansion.tooltip("How a new plan starts. By hand adds only the recipe you asked for and "
-                + "leaves every ingredient as a question you answer by clicking it; automatic picks "
-                + "the whole chain for you. By hand is the default: automatic selection is good on "
+        expansion.tooltip("How a new plan starts. By hand follows the default recipes below as far "
+                + "as they go and leaves every ingredient past them as a question you answer by "
+                + "clicking it; automatic picks the whole chain for you. By hand is the default: "
+                + "automatic selection is good on "
                 + "material chains and unreliable above them, and a plan it got wrong is one you "
                 + "have to unpick. Either way each plan can be switched in its own Settings.");
         expansion.bounds(tier.x() + tier.width() + GAP, cursorY,
