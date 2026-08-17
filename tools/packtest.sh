@@ -66,6 +66,21 @@ if [[ $setup -eq 1 ]]; then
   done
 fi
 
+# The GregTech MFP was compiled against, versus the one the pack actually ships. These are allowed
+# to differ - MFP is built to survive a fork it does not control - but nothing was comparing them,
+# and the difference is invisible until it bites. It bit once already: the pack's 1.7.0 calls a
+# modifier `pyrolize_oven_oc` and the 1.7.0b checkout calls it `pyrolyse_oven_oc`, so a behaviour
+# written against the checkout worked in every dev run and applied to nothing in the pack
+# (STATUS.md 14a.1). A warning here is the cheapest place to notice: this script is the one thing
+# that has both versions in front of it.
+GTCEU_BUILT="$(sed -n 's/^[[:space:]]*gtceu_version=//p' "$REPO/gradle.properties" | tr -d '[:space:]')"
+GTCEU_PACK="$(ls "$INSTANCE/mods" 2>/dev/null | sed -n 's/^gtceu-st-1\.20\.1-\(.*\)\.jar$/\1/p' | head -1)"
+if [[ -n "$GTCEU_PACK" && -n "$GTCEU_BUILT" && "$GTCEU_PACK" != "$GTCEU_BUILT" ]]; then
+  echo "packtest: WARNING - MFP was built against GregTech $GTCEU_BUILT but the pack ships $GTCEU_PACK." >&2
+  echo "packtest:   Modifier ids can differ between them. Check 'mfp modifiers' in BOTH worlds" >&2
+  echo "packtest:   before trusting a behaviour verified in only one." >&2
+fi
+
 # Always the jar we just built: testing yesterday's artifact against today's question is how a
 # "fixed" bug comes back.
 if [[ -f "$REPO/forge/build/libs/$JAR" ]]; then
