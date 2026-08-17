@@ -24,17 +24,30 @@ public final class GtCoils {
     /** Structure option giving the coil temperature directly, in kelvin. */
     public static final String OPTION_COIL_TEMPERATURE = "coil_temperature";
 
-    private static final Map<String, Integer> TEMPERATURES = new LinkedHashMap<>();
+    /**
+     * One coil's four numbers, which are four unrelated things.
+     *
+     * <p>{@code temperature} gates blast furnace recipes and buys their discount steps;
+     * {@code tier} is the ordinal the chemical reactor, cracker and pyrolyse oven scale on;
+     * {@code level} and {@code energyDiscount} exist only for the multi smelter, which uses them to
+     * throw the recipe's own duration and EU/t away and substitute its own. No two of them are
+     * derivable from each other — kanthal and nichrome share a level while differing in temperature,
+     * nichrome and rtm_alloy share a discount while differing in level — so all four are recorded.
+     */
+    private record Coil(int temperature, int level, int energyDiscount) {}
+
+    private static final Map<String, Coil> COILS = new LinkedHashMap<>();
 
     static {
-        TEMPERATURES.put("cupronickel", 1800);
-        TEMPERATURES.put("kanthal", 2700);
-        TEMPERATURES.put("nichrome", 3600);
-        TEMPERATURES.put("rtm_alloy", 4500);
-        TEMPERATURES.put("hssg", 5400);
-        TEMPERATURES.put("naquadah", 7200);
-        TEMPERATURES.put("trinium", 9001);
-        TEMPERATURES.put("tritanium", 10800);
+        //                       name             temp  level  discount
+        COILS.put("cupronickel",   new Coil( 1800,  1,  1));
+        COILS.put("kanthal",       new Coil( 2700,  2,  1));
+        COILS.put("nichrome",      new Coil( 3600,  2,  2));
+        COILS.put("rtm_alloy",     new Coil( 4500,  4,  2));
+        COILS.put("hssg",          new Coil( 5400,  4,  4));
+        COILS.put("naquadah",      new Coil( 7200,  8,  4));
+        COILS.put("trinium",       new Coil( 9001,  8,  8));
+        COILS.put("tritanium",     new Coil(10800, 16,  8));
         // Star-Technology's own three, from kubejs/startup_scripts/objects/blocks/coils.js. They
         // are here rather than left to the raw-temperature escape hatch because they are the pack's
         // entire endgame: without them the three hottest coils in the game MFP is built for are
@@ -46,17 +59,39 @@ public final class GtCoils {
         // continues the sequence exactly: .tier(8), .tier(9), .tier(10) after tritanium's 7. That is
         // what makes appending them safe for tierOf as well as for temperatureOf; a pack that
         // numbered its coils differently would need the tier recorded rather than counted.
-        TEMPERATURES.put("zalloy", 13499);
-        TEMPERATURES.put("magmada_alloy", 16199);
-        TEMPERATURES.put("abyssal_alloy", 18888);
+        COILS.put("zalloy",        new Coil(13499, 24, 12));
+        COILS.put("magmada_alloy", new Coil(16199, 32, 16));
+        COILS.put("abyssal_alloy", new Coil(18888, 40, 20));
     }
 
     private GtCoils() {}
 
     /** Temperature for a coil name, or -1 when the name is not one this table knows. */
     public static int temperatureOf(String coilName) {
+        Coil coil = lookup(coilName);
+        return coil == null ? -1 : coil.temperature();
+    }
+
+    /**
+     * The multi smelter's parallel level, or -1 if unknown.
+     *
+     * <p>Not the tier and not a rescaling of it: cupronickel is level 1 and kanthal level 2, but
+     * kanthal and nichrome are both level 2 while sitting a tier apart.
+     */
+    public static int levelOf(String coilName) {
+        Coil coil = lookup(coilName);
+        return coil == null ? -1 : coil.level();
+    }
+
+    /** The multi smelter's energy divisor, or -1 if unknown. A divisor, not a fraction off. */
+    public static int energyDiscountOf(String coilName) {
+        Coil coil = lookup(coilName);
+        return coil == null ? -1 : coil.energyDiscount();
+    }
+
+    private static Coil lookup(String coilName) {
         String key = normalise(coilName);
-        return key == null ? -1 : TEMPERATURES.getOrDefault(key, -1);
+        return key == null ? null : COILS.get(key);
     }
 
     /**
@@ -76,7 +111,7 @@ public final class GtCoils {
             return -1;
         }
         int tier = 0;
-        for (String name : TEMPERATURES.keySet()) {
+        for (String name : COILS.keySet()) {
             if (name.equals(key)) {
                 return tier;
             }
@@ -99,6 +134,6 @@ public final class GtCoils {
     }
 
     public static Set<String> names() {
-        return TEMPERATURES.keySet();
+        return COILS.keySet();
     }
 }
