@@ -345,6 +345,10 @@ final class GtRecipeConverter {
             extra.put("gtceu:data", data);
             hoistInt(data, "ebf_temp", "gtceu:ebf_temp", extra);
             hoistInt(data, "vacuum_level", "gtceu:vacuum_level", extra);
+            // start_core's reflector reactors gate on this and overclock above their own tier when
+            // the built reflector beats it, so it decides both whether a fusion line runs and how
+            // fast — see FusionOverclockBehaviour.
+            hoistInt(data, "reflector_tier", "gtceu:reflector_tier", extra);
         }
 
         Map<String, Integer> boosts = tierChanceBoosts(recipe);

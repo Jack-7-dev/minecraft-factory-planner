@@ -721,6 +721,120 @@ class BehaviourChainTest {
         assertEquals(20.0 / 160, b.craftsPerSecond(), TOLERANCE);
     }
 
+    /**
+     * The multi smelter throws the recipe away, which nothing else here does.
+     *
+     * <p>A furnace recipe's own duration and EU/t never reach the hatch: GregTech substitutes 256
+     * ticks and a coil-derived EU/t, then runs {@code 32 x level} crafts at once. So the answer must
+     * be independent of what the recipe says about time, and must scale with the coil rather than
+     * with anything else. Both are asserted, because either one alone would pass on a model that
+     * merely got the magnitude right by accident.
+     */
+    @Test
+    @DisplayName("the multi smelter replaces the recipe's duration and energy with the coil's")
+    void multiSmelterSubstitutesItsOwnRecipe() {
+        MfpMachine smelter = smelter();
+        BehaviourThroughputResolver resolver = resolver(smelter);
+
+        // Cupronickel: level 1, so 32 at once; EU/t is 4 x 32 / (8 x 1) = 16, which at an LV hatch
+        // is its own tier and buys no overclock. 32 crafts per 256 ticks.
+        Throughput cupronickel = resolver.resolve(smelterRecipe(128, 16),
+                MachineConfig.of(smelter.id(), 1).withOption(GtCoils.OPTION_COIL, "cupronickel"));
+        assertEquals(20.0 / 256 * 32, cupronickel.craftsPerSecond(), TOLERANCE);
+        assertEquals(16 * 20.0, cupronickel.euInPerSecond(), TOLERANCE);
+
+        // A recipe ten times as long gives exactly the same answer, because its duration is gone.
+        Throughput slow = resolver.resolve(smelterRecipe(1280, 16),
+                MachineConfig.of(smelter.id(), 1).withOption(GtCoils.OPTION_COIL, "cupronickel"));
+        assertEquals(cupronickel.craftsPerSecond(), slow.craftsPerSecond(), TOLERANCE);
+        assertEquals(cupronickel.euInPerSecond(), slow.euInPerSecond(), TOLERANCE);
+
+        // Nichrome is level 2, discount 2: 64 at once for 4 x 64 / (8 x 2) = 16 EU/t. Twice the
+        // throughput for the same power - which is the whole reason to build a better coil here.
+        Throughput nichrome = resolver.resolve(smelterRecipe(128, 16),
+                MachineConfig.of(smelter.id(), 1).withOption(GtCoils.OPTION_COIL, "nichrome"));
+        assertEquals(2 * cupronickel.craftsPerSecond(), nichrome.craftsPerSecond(), TOLERANCE);
+        assertEquals(cupronickel.euInPerSecond(), nichrome.euInPerSecond(), TOLERANCE);
+    }
+
+    /** The coil is worth a fortyfold throughput range here, so not choosing one must be flagged. */
+    @Test
+    @DisplayName("a multi smelter with no coil chosen assumes the weakest and says so")
+    void multiSmelterWithoutACoilIsApproximate() {
+        MfpMachine smelter = smelter();
+        Throughput throughput = resolver(smelter).resolve(smelterRecipe(128, 16),
+                MachineConfig.of(smelter.id(), 1));
+
+        assertEquals(20.0 / 256 * 32, throughput.craftsPerSecond(), TOLERANCE);
+        assertEquals(Confidence.APPROXIMATE, throughput.confidence());
+    }
+
+    /**
+     * Fusion's overclock is half an overclock: duration halves, but EU/t only doubles.
+     *
+     * <p>Asserted against the ordinary rule rather than in isolation, because the number that
+     * matters is the ratio. A model that applied the usual four-times factor would report the same
+     * duration and four times the draw, and a plasma line at UV is where every fusion recipe in this
+     * pack lives — so the error would land on the most expensive part of a plan and nowhere cheap
+     * enough to notice it first.
+     */
+    @Test
+    @DisplayName("a fusion reactor doubles its draw per overclock, not quadruples it")
+    void fusionOverclocksAtHalfPrice() {
+        MfpMachine reactor = new MfpMachine("gtceu:uv_fusion_reactor", "Fusion Reactor MK3", -1, 0,
+                List.of("gtceu:fusion_reactor"), true, List.of("fusion_overclock"), "test");
+
+        // A LuV recipe (24576 EU/t) in a UV reactor: two tiers up, so two overclocks.
+        MfpRecipe recipe = MfpRecipe.builder("test:helium_plasma", "gtceu:fusion_reactor", "test")
+                .input(MfpIngredient.of(DUST, 1))
+                .output(MfpOutput.of(INGOT, 1))
+                .duration(64)
+                .euIn(24576)
+                .build();
+
+        Throughput throughput = resolver(reactor).resolve(recipe, MachineConfig.of(reactor.id(), 8));
+
+        // Duration 64 -> 16, the ordinary halving twice over.
+        assertEquals(20.0 / 16, throughput.craftsPerSecond(), TOLERANCE);
+        // EU/t 24576 -> 98304, which is x4 across two overclocks. The ordinary rule would give x16.
+        assertEquals(24576 * 4 * 20.0, throughput.euInPerSecond(), TOLERANCE);
+        assertEquals(Confidence.EXACT, throughput.confidence());
+    }
+
+    /** A reactor below the recipe's tier cannot run it, however much power is available. */
+    @Test
+    @DisplayName("a fusion recipe above the reactor's tier is refused, not slowed")
+    void fusionRefusesAboveItsTier() {
+        MfpMachine reactor = new MfpMachine("gtceu:luv_fusion_reactor", "Fusion Reactor MK1", -1, 0,
+                List.of("gtceu:fusion_reactor"), true, List.of("fusion_overclock"), "test");
+
+        MfpRecipe recipe = MfpRecipe.builder("test:naquadria_plasma", "gtceu:fusion_reactor", "test")
+                .input(MfpIngredient.of(DUST, 1))
+                .output(MfpOutput.of(INGOT, 1))
+                .duration(64)
+                .euIn(98304)
+                .build();
+
+        Throughput throughput = resolver(reactor).resolve(recipe, MachineConfig.of(reactor.id(), 6));
+
+        assertEquals(0.0, throughput.craftsPerSecond(), TOLERANCE);
+        assertEquals(Confidence.UNKNOWN, throughput.confidence());
+    }
+
+    private static MfpRecipe smelterRecipe(int durationTicks, long eut) {
+        return MfpRecipe.builder("test:smelt_iron", "gtceu:multi_smelter", "test")
+                .input(MfpIngredient.of(DUST, 1))
+                .output(MfpOutput.of(INGOT, 1))
+                .duration(durationTicks)
+                .euIn(eut)
+                .build();
+    }
+
+    private static MfpMachine smelter() {
+        return new MfpMachine("gtceu:multi_smelter", "Multi Smelter", -1, 0,
+                List.of("gtceu:multi_smelter"), true, List.of("multi_smellter_parallel"), "test");
+    }
+
     private static MfpMachine oven(String modifierId) {
         return new MfpMachine("gtceu:pyrolyse_oven", "Pyrolyse Oven", -1, 0,
                 List.of("gtceu:pyrolyse_oven"), true, List.of(modifierId), "test");

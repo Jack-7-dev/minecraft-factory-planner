@@ -4,8 +4,10 @@ import dev.mfp.core.behaviour.gt.BatchModeBehaviour;
 import dev.mfp.core.behaviour.gt.CoilOverclockBehaviour;
 import dev.mfp.core.behaviour.gt.CoilTierOverclockBehaviour;
 import dev.mfp.core.behaviour.gt.ElectricOverclockBehaviour;
+import dev.mfp.core.behaviour.gt.FusionOverclockBehaviour;
 import dev.mfp.core.behaviour.gt.GeneratorBehaviour;
 import dev.mfp.core.behaviour.gt.LargeTurbineBehaviour;
+import dev.mfp.core.behaviour.gt.MultiSmelterBehaviour;
 import dev.mfp.core.behaviour.gt.ParallelHatchBehaviour;
 import dev.mfp.core.behaviour.gt.SteamMachineBehaviour;
 import dev.mfp.core.behaviour.gt.SteamMultiblockBehaviour;
@@ -71,6 +73,9 @@ public final class BehaviourRegistry {
                 CoilTierOverclockBehaviour.pyrolyseOven())) {
             registry.register(coilTier, coilTier.modifierIds());
         }
+        registry.register(new MultiSmelterBehaviour());
+        registry.register(FusionOverclockBehaviour.gregTech());
+        registry.register(FusionOverclockBehaviour.reflector());
         registry.register(new ParallelHatchBehaviour("parallel_hatch"));
         registry.register(new BatchModeBehaviour());
 
@@ -165,13 +170,16 @@ public final class BehaviourRegistry {
      *       pollution zone, which is a property of where it was built and not of the plan.
      *   <li>{@code consume_eu_to_start} — a one-off charge to begin a recipe. It changes what the
      *       machine needs buffered, never its rate.
+     *   <li>{@code fake_fusion_overclock} — {@code start_core}'s, and a no-op in the strongest sense
+     *       available: its body is {@code return ModifierFunction.IDENTITY;}. The reflector reactors
+     *       declare it beside {@code reflector_fusion_reactor}, which is the rule that does the work.
      * </ul>
      *
-     * <p>Both are in GregTech's own {@code GTRecipeModifiers.ignoreModifiers}, which is where the
-     * game decides they are not worth showing the player either.
+     * <p>The first two are in GregTech's own {@code GTRecipeModifiers.ignoreModifiers}, which is
+     * where the game decides they are not worth showing the player either.
      */
-    private static final Set<String> NEUTRAL_MODIFIERS =
-            Set.of("default_environment_requirement", "consume_eu_to_start");
+    private static final Set<String> NEUTRAL_MODIFIERS = Set.of(
+            "default_environment_requirement", "consume_eu_to_start", "fake_fusion_overclock");
 
     /**
      * Named modifiers the machine declares that nothing in this registry models.

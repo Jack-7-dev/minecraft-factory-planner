@@ -28,6 +28,10 @@ public final class OverclockMaths {
     public static final double STD_DURATION_FACTOR = 0.5;
     /** Duration multiplier per perfect overclock. */
     public static final double PERFECT_DURATION_FACTOR = 0.25;
+    /** EU/t multiplier per fusion overclock — half the usual, which is why fusion scales so well. */
+    public static final double FUSION_VOLTAGE_FACTOR = 2.0;
+    /** Duration multiplier per fusion overclock: the ordinary halving. */
+    public static final double FUSION_DURATION_FACTOR = 0.5;
     /** Kelvin per coil discount step. */
     public static final int COIL_DISCOUNT_TEMPERATURE = 900;
 
@@ -102,12 +106,31 @@ public final class OverclockMaths {
      */
     public static Result standard(long recipeEut, int durationTicks, int overclocks, int baseOverclocks,
                                   long maxVoltage, double durationFactor) {
+        return standard(recipeEut, durationTicks, overclocks, baseOverclocks, maxVoltage,
+                durationFactor, STD_VOLTAGE_FACTOR);
+    }
+
+    /**
+     * Plain overclocking with a voltage factor other than four.
+     *
+     * <p>Only the fusion reactor needs this, and it needs it because its overclock is <em>half</em>
+     * an overclock in both directions at once: duration halves and EU/t merely doubles, where an
+     * ordinary non-perfect overclock halves duration for four times the power. Fusion is the one
+     * place in GregTech where overclocking is close to free, which is exactly why hardcoding the
+     * usual factor here would have made a fusion line look four times as expensive as it is.
+     *
+     * <p>Note that the two factors are counted differently: the number of overclocks available comes
+     * from the four-times-per-tier voltage ladder regardless, and only the <em>spending</em> of them
+     * doubles. That asymmetry is GregTech's, not a simplification.
+     */
+    public static Result standard(long recipeEut, int durationTicks, int overclocks, int baseOverclocks,
+                                  long maxVoltage, double durationFactor, double voltageFactor) {
         double duration = durationTicks;
         double eut = recipeEut;
         int performed = 0;
 
         for (int i = 0; i < overclocks; i++) {
-            double nextEut = eut * STD_VOLTAGE_FACTOR;
+            double nextEut = eut * voltageFactor;
             if (nextEut > maxVoltage) {
                 break;
             }
@@ -120,7 +143,7 @@ public final class OverclockMaths {
             performed++;
         }
 
-        return new Result(Math.pow(STD_VOLTAGE_FACTOR, performed), Math.pow(durationFactor, performed),
+        return new Result(Math.pow(voltageFactor, performed), Math.pow(durationFactor, performed),
                 performed, Math.min(performed, baseOverclocks), 1);
     }
 
