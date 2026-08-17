@@ -7,19 +7,17 @@ come in from outside, what comes out spare, and the total EU/t.
 It is a port in spirit of the Factorio mod **Factory Planner**, and its first target is **GregTech**
 and the Star-Technology modpack.
 
-This is **v2**. It plans, it solves, and it has a full in-game interface.
-
 ## What it does
 
-- **Plans a chain from a target.** Pick an item, state a rate, get the lines that make it.
-- **Or build the chain by hand.** Every ingredient on a line is a question: click it and choose the
-  recipe that answers it. This is the default, because automatic selection is good on material chains
-  and less reliable above them — and a plan you built is one you can correct.
-- **Three solver engines.** A single top-down pass for simple chains, a linear system over the whole
-  plan for chains that loop, and a linear programme for everything that is an inequality rather than
-  an equation: machine limits, line percentages, producing at least what was asked for.
-- **Closes loops.** Star-Technology deliberately builds chains that feed each other — growing a tree
-  gives off the oxygen that burning charcoal needs to make the carbon dioxide the tree wants — and
+- **Build a factory chain.** Every ingredient on a line is clickable: click it and choose the
+  recipe that you want. This is the default, because automatic selection is good on material chains
+  and less reliable above them.
+- **Or automatically plan a chain from a target.** Pick an item, state a rate, get the lines that make
+  it automatically.
+- **Three solver engines.** A single top-down pass for simple chains (Sequential engine), a linear system over the whole
+  plan for chains that loop (Matrix engine), and a linear program for everything that is an inequality rather than
+  an equation (Simplex engine).
+- **Closes loops.** MFP tries to find loops: deliberate build chains that feed each other,
   the planner will find and balance those rather than planning a second factory to supply itself.
 - **Uses byproducts.** A line's leftovers are offered back to the plan, and the change is kept only
   if the plan came out no larger, no hungrier and no more expensive.
@@ -33,14 +31,6 @@ This is **v2**. It plans, it solves, and it has a full in-game interface.
 In game, `P` opens the planner, or `/mfpplan 1 gtceu:steel_ingot` opens it on a solved plan.
 
 Everything the planner does is also driven from the server console, which is how it is tested:
-
-```
-/mfp plan 1 gtceu:steel_ingot     plan a chain and print it
-/mfp explain                      show the working behind every line's rate
-/mfp alternatives <item>          every way to make something, ranked, with the reasons
-/mfp resolve <item>               answer an import by choosing a recipe for it
-/mfp defaults                     the standing preferences every plan starts from
-```
 
 ## Building
 
@@ -62,15 +52,10 @@ core/    the model, the recipe index, the recipe chooser and the solvers - plain
 forge/   the mod: recipe providers, GregTech integration, commands and the interface
 ```
 
-**`core` contains no game imports at all**, and a build task enforces it. That is what lets the maths
+**`core` contains no game imports at all**. That is what lets the maths
 be tested in about a second with no Minecraft on the classpath, and it means a GregTech update cannot
-break the solver. 222 tests cover it.
+break the solver.
 
-A few conventions run through everything: every rate is per second, recipe amounts are per craft,
-machine counts stay fractional until they are displayed, energy flows through the solver as though it
-were an item, and one unconvertible recipe out of tens of thousands costs that recipe and nothing
-else.
+## Download
 
-## Licence
-
-MIT, as declared in `gradle.properties`.
+Either build from this source using gradle or choose the latest release on the right.
