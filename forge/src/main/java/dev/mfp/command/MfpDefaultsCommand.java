@@ -82,7 +82,8 @@ public final class MfpDefaultsCommand {
 
         send(source, "  expansion: " + (preferences.autoResolve()
                 ? "automatic - new plans pick their whole chain"
-                : "by hand - new plans stop below the target"), ChatFormatting.WHITE);
+                : "by hand - new plans follow the default recipes below and stop where they run out"),
+                ChatFormatting.WHITE);
 
         send(source, "  default recipes: " + preferences.defaultRecipes().size(), ChatFormatting.AQUA);
         preferences.defaultRecipes().forEach((key, recipeId) ->

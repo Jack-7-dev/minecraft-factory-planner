@@ -145,9 +145,10 @@ public final class PlanSettingsScreen extends ModalScreen {
             ClientPlanner.refresh();
             rebuild();
         });
-        resolve.tooltip("Automatic picks a recipe for every input, all the way down. By hand stops "
-                + "below the target: everything under it arrives on the Imports tab, and you answer "
-                + "them one at a time by clicking. Your pinned recipes are what the plan is made of "
+        resolve.tooltip("Automatic picks a recipe for every input, all the way down. By hand "
+                + "follows the recipes you have set as defaults and stops where they run out: "
+                + "everything past them arrives on the Imports tab, and you answer them one at a "
+                + "time by clicking. Your pinned recipes are what the plan is made of "
                 + "either way, so switching back and forth loses nothing.");
         resolve.bounds(contentX() + labelWidth, cursorY, Math.max(110, resolve.preferredWidth()), 14);
         widgets.add(resolve);

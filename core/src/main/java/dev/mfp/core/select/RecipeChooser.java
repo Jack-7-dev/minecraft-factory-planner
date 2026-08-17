@@ -1303,7 +1303,14 @@ public final class RecipeChooser {
             // answered is an import, and answering it is what adds the next line. Recorded with a
             // reason, because the alternative message — "nothing in the index produces this" — is a
             // claim about the pack, and here it would be a claim about a setting.
-            if (!plan.autoResolve() && !answered && depth > 0) {
+            //
+            // A standing default counts as answered. "This is how I make steel" is the same kind of
+            // statement as a pin — the user's, about this item — differing only in being made once
+            // rather than per plan, and hand mode exists to keep the scorer's guesses out, not the
+            // user's own decisions. So the walk follows a defaulted chain as far as the defaults go
+            // and stops where the next answer would have to be invented, which leaves the import
+            // list as exactly the set of things they have never decided.
+            if (!plan.autoResolve() && !answered && depth > 0 && standingDefault(key) == null) {
                 unresolved.add(key);
                 if (!index.producing(key).isEmpty()) {
                     importReasons.put(key, "auto-resolve is off - pick a recipe to make it here");
