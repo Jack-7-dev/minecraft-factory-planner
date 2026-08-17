@@ -35,6 +35,20 @@ public final class GtCoils {
         TEMPERATURES.put("naquadah", 7200);
         TEMPERATURES.put("trinium", 9001);
         TEMPERATURES.put("tritanium", 10800);
+        // Star-Technology's own three, from kubejs/startup_scripts/objects/blocks/coils.js. They
+        // are here rather than left to the raw-temperature escape hatch because they are the pack's
+        // entire endgame: without them the three hottest coils in the game MFP is built for are
+        // "unknown", so a blast furnace using one reports no coil at all and a chemical reactor
+        // falls back to assuming cupronickel — a 2.5x error on the machines a player has worked
+        // hardest to build.
+        //
+        // Their tiers are not inferred from this list's order but declared by the pack, which
+        // continues the sequence exactly: .tier(8), .tier(9), .tier(10) after tritanium's 7. That is
+        // what makes appending them safe for tierOf as well as for temperatureOf; a pack that
+        // numbered its coils differently would need the tier recorded rather than counted.
+        TEMPERATURES.put("zalloy", 13499);
+        TEMPERATURES.put("magmada_alloy", 16199);
+        TEMPERATURES.put("abyssal_alloy", 18888);
     }
 
     private GtCoils() {}

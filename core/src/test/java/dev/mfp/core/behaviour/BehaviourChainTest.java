@@ -665,4 +665,25 @@ class BehaviourChainTest {
         assertEquals(Confidence.EXACT, throughput.confidence());
         assertNull(throughput.note());
     }
+
+    /**
+     * Star-Technology's own three coils, which are the pack's entire endgame.
+     *
+     * <p>Registered in KubeJS rather than by GregTech, and the pack declares their tiers explicitly
+     * as 8, 9 and 10 — continuing the built-in sequence — which is what makes appending them to the
+     * table correct for {@code tierOf} and not merely for {@code temperatureOf}.
+     */
+    @Test
+    @DisplayName("the pack's own coils are known by name, not just by raw temperature")
+    void packCoilsAreInTheTable() {
+        assertEquals(13499, GtCoils.temperatureOf("zalloy"));
+        assertEquals(16199, GtCoils.temperatureOf("kubejs:magmada_alloy_coil_block"));
+        assertEquals(18888, GtCoils.temperatureOf("abyssal_alloy"));
+
+        assertEquals(7, GtCoils.tierOf("tritanium"));
+        assertEquals(8, GtCoils.tierOf("zalloy"));
+        assertEquals(9, GtCoils.tierOf("magmada_alloy"));
+        assertEquals(10, GtCoils.tierOf("abyssal_alloy"));
+        assertEquals(-1, GtCoils.tierOf("no_such_coil"));
+    }
 }
