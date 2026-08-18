@@ -11,6 +11,7 @@ import dev.mfp.client.widget.FlowPanel;
 import dev.mfp.client.widget.Fmt;
 import dev.mfp.client.widget.MfpWidget;
 import dev.mfp.client.widget.ScrollPanel;
+import dev.mfp.client.widget.Slider;
 import dev.mfp.client.widget.SlotWidget;
 import dev.mfp.client.widget.TabBar;
 import dev.mfp.client.widget.Table;
@@ -97,6 +98,23 @@ public final class PlannerScreen extends Screen {
      */
     private static boolean itemsInStacks;
     private static boolean fluidsInBuckets;
+
+    /**
+     * How much of Minecraft's own GUI scale the planner undoes.
+     *
+     * <p>Every other screen in the game is a few large controls and looks right at 3x; this one is a
+     * table of eight columns, and at 3x every column truncates to an ellipsis on anything short of a
+     * very large monitor. The game's setting cannot be the answer — it is global, and shrinking the
+     * whole interface to read one screen is a worse trade than the truncation — so the planner
+     * carries its own multiplier and draws itself into a correspondingly larger logical space.
+     *
+     * <p>Session-scoped, like {@link #timescale} and {@link #perMachine}: it is a way of looking at
+     * the plan, not a fact about it.
+     */
+    private static double zoom = 1.0;
+
+    private static final double MIN_ZOOM = 0.5;
+    private static final double MAX_ZOOM = 1.5;
     private static boolean perMachine;
     private static int selectedTab;
 
@@ -163,8 +181,27 @@ public final class PlannerScreen extends Screen {
 
     @Override
     protected void init() {
+        applyZoom();
         this.plan = ClientPlanner.current();
         rebuild();
+    }
+
+    /**
+     * Trades the screen's real size for a larger logical one, which {@link #render} scales back down.
+     *
+     * <p>Read from the window rather than from the inherited fields, because {@code init} runs again
+     * on every resize and on every zoom change — halving {@code this.width} each time would shrink
+     * the planner away to nothing after three presses of the slider.
+     */
+    private void applyZoom() {
+        var window = Minecraft.getInstance().getWindow();
+        this.width = (int) (window.getGuiScaledWidth() / zoom);
+        this.height = (int) (window.getGuiScaledHeight() / zoom);
+    }
+
+    /** Screen pixels to the planner's own, which are {@link #zoom} times smaller. */
+    private double unzoom(double coordinate) {
+        return coordinate / zoom;
     }
 
     /** Re-solve and redraw. What every edit ends with. */
@@ -246,6 +283,25 @@ public final class PlannerScreen extends Screen {
                 + "- applied to every plan, and overruled by anything you decide in one.");
         defaults.bounds(settings.x() + settings.width() + GAP, cursorY, defaults.preferredWidth(), 14);
         widgets.add(defaults);
+
+        // On the main screen rather than in Settings because it is the one control the user is meant
+        // to drag while watching the table: what fits at which scale is a question about the monitor
+        // in front of them, and no number in a dialog answers it.
+        Slider zoomSlider = new Slider(MIN_ZOOM, MAX_ZOOM, zoom, value -> {
+            zoom = value;
+            // The whole screen is re-laid-out into the new logical size; nothing is re-solved,
+            // because how big the table is drawn is not a fact about the plan.
+            applyZoom();
+            rebuild();
+        });
+        zoomSlider.step(0.05)
+                .label(value -> "Scale: " + Math.round(value * 100) + "%")
+                .tooltip("How large the planner draws itself, independently of Minecraft's own GUI "
+                        + "scale. Below 100% the columns get the room they need at a 3x game scale, "
+                        + "where most of them otherwise truncate to an ellipsis. Kept for this "
+                        + "session.");
+        zoomSlider.bounds(defaults.x() + defaults.width() + GAP, cursorY, 88, 14);
+        widgets.add(zoomSlider);
 
         cursorY += 14 + GAP;
 
@@ -1210,6 +1266,19 @@ public final class PlannerScreen extends Screen {
 
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
+        // Everything below draws in the planner's own coordinates, which are `zoom` times larger
+        // than the screen's. The cursor has to be translated with it, or the widgets would be drawn
+        // in one space and hit-tested in another.
+        graphics.pose().pushPose();
+        graphics.pose().scale((float) zoom, (float) zoom, 1.0f);
+        try {
+            renderPlanner(graphics, (int) unzoom(mouseX), (int) unzoom(mouseY), partialTick);
+        } finally {
+            graphics.pose().popPose();
+        }
+    }
+
+    private void renderPlanner(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         renderBackground(graphics);
 
         int panelX = MARGIN;
@@ -1231,10 +1300,10 @@ public final class PlannerScreen extends Screen {
 
         if (plan == null) {
             renderEmptyState(graphics, panelX, panelY, panelWidth);
-            for (MfpWidget widget : widgets) {
+            for (MfpWidget widget : List.copyOf(widgets)) {
                 widget.render(graphics, mouseX, mouseY, partialTick);
             }
-            for (MfpWidget widget : widgets) {
+            for (MfpWidget widget : List.copyOf(widgets)) {
                 tooltip.offer(widget.tooltip(mouseX, mouseY), mouseX, mouseY);
             }
             super.render(graphics, mouseX, mouseY, partialTick);
@@ -1259,13 +1328,16 @@ public final class PlannerScreen extends Screen {
             table.drag(dragging ? grabbedRow : -1, dragging ? dropIndex : -1);
         }
 
-        for (MfpWidget widget : widgets) {
+        // Snapshots, for the same reason the input handlers take one: the scale slider rebuilds
+        // every widget from inside its own render, and iterating the live list through that is a
+        // concurrent modification.
+        for (MfpWidget widget : List.copyOf(widgets)) {
             widget.render(graphics, mouseX, mouseY, partialTick);
         }
         table.renderHeader(graphics, tableX, headerY, tableWidth);
         renderStatusBar(graphics, panelX, panelY + panelHeight - STATUS_HEIGHT - 2, panelWidth);
 
-        for (MfpWidget widget : widgets) {
+        for (MfpWidget widget : List.copyOf(widgets)) {
             tooltip.offer(widget.tooltip(mouseX, mouseY), mouseX, mouseY);
         }
         tooltip.offer(table.headerTooltip(tableX, headerY, tableWidth, mouseX, mouseY), mouseX, mouseY);
@@ -1405,7 +1477,9 @@ public final class PlannerScreen extends Screen {
     // ------------------------------------------------------------------ input
 
     @Override
-    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+    public boolean mouseClicked(double screenX, double screenY, int button) {
+        double mouseX = unzoom(screenX);
+        double mouseY = unzoom(screenY);
         // A snapshot: a widget's action re-solves and rebuilds this list underneath the loop.
         for (MfpWidget widget : List.copyOf(widgets)) {
             if (widget.mouseClicked(mouseX, mouseY, button)) {
@@ -1416,7 +1490,9 @@ public final class PlannerScreen extends Screen {
     }
 
     @Override
-    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+    public boolean mouseDragged(double screenX, double screenY, int button, double dragX, double dragY) {
+        double mouseX = unzoom(screenX);
+        double mouseY = unzoom(screenY);
         if (grabbedRow >= 0) {
             this.dragMouseY = mouseY;
             if (!dragging && Math.abs(mouseY - grabbedAtY) >= DRAG_THRESHOLD) {
@@ -1434,7 +1510,9 @@ public final class PlannerScreen extends Screen {
     }
 
     @Override
-    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+    public boolean mouseReleased(double screenX, double screenY, int button) {
+        double mouseX = unzoom(screenX);
+        double mouseY = unzoom(screenY);
         if (scroll != null) {
             scroll.mouseReleased();
         }
@@ -1464,7 +1542,9 @@ public final class PlannerScreen extends Screen {
     }
 
     @Override
-    public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
+    public boolean mouseScrolled(double screenX, double screenY, double delta) {
+        double mouseX = unzoom(screenX);
+        double mouseY = unzoom(screenY);
         for (MfpWidget widget : List.copyOf(widgets)) {
             if (widget.mouseScrolled(mouseX, mouseY, delta)) {
                 return true;
