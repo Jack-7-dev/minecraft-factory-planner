@@ -90,8 +90,10 @@ public final class MfpClient {
     @SubscribeEvent
     public static void onRecipesUpdated(RecipesUpdatedEvent event) {
         ClientIndex.invalidate();
-        // The machine standing in for a recipe type is read off the index, so it goes stale with it.
+        // The machine standing in for a recipe type is read off the index, so it goes stale with it,
+        // and so does the recipe that was picked as the way to build each machine block.
         MachineStacks.clearCache();
+        MachineParts.clearCache();
     }
 
     @SubscribeEvent
@@ -104,6 +106,7 @@ public final class MfpClient {
         ClientPlanner.clear();
         KeyStacks.clearCache();
         MachineStacks.clearCache();
+        MachineParts.clearCache();
     }
 
     @SubscribeEvent

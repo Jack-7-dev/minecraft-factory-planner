@@ -4,6 +4,7 @@ import dev.mfp.client.ClientIndex;
 import dev.mfp.client.ClientPlan;
 import dev.mfp.client.ClientPlanner;
 import dev.mfp.client.KeyStacks;
+import dev.mfp.client.MachineParts;
 import dev.mfp.client.MachineStacks;
 import dev.mfp.client.MfpClient;
 import dev.mfp.client.widget.Cells;
@@ -23,6 +24,7 @@ import dev.mfp.core.behaviour.GtTiers;
 import dev.mfp.core.behaviour.MachineBehaviour;
 import dev.mfp.core.behaviour.ThroughputResult;
 import dev.mfp.core.model.Confidence;
+import dev.mfp.core.model.MfpIngredient;
 import dev.mfp.core.model.MfpKey;
 import dev.mfp.core.model.MfpMachine;
 import dev.mfp.core.model.MfpOutput;
@@ -30,6 +32,7 @@ import dev.mfp.core.model.MfpRecipe;
 import dev.mfp.core.plan.Arithmetic;
 import dev.mfp.core.plan.DisplayOrder;
 import dev.mfp.core.plan.Line;
+import dev.mfp.core.plan.MachineTally;
 import dev.mfp.core.plan.LineDecision;
 import dev.mfp.core.plan.MachineConfig;
 import dev.mfp.core.plan.Plan;
@@ -110,6 +113,17 @@ public final class PlannerScreen extends Screen {
     private static Timescale targetTimescale = Timescale.PER_SECOND;
     private static boolean perMachine;
     private static int selectedTab;
+
+    /**
+     * The tab that swaps the table underneath it, rather than only the strip of flows.
+     *
+     * <p>The other three tabs summarise the plan's <em>flows</em>, and the table below them is the
+     * plan's lines, so they sit together on one screen. Machines is a different axis of the same
+     * plan — how many of each block the whole factory costs — and there is no useful reading of it
+     * per line, because per line is exactly what the Machines column already says. So this tab
+     * takes the table over while it is open, and Products puts it back.
+     */
+    private static final int MACHINES_TAB = 3;
 
     private final Tooltip tooltip = new Tooltip();
     private final List<MfpWidget> widgets = new ArrayList<>();
@@ -290,7 +304,11 @@ public final class PlannerScreen extends Screen {
                 new TabBar.Tab("Byproducts", countReal(solved.byproducts()),
                         "Surplus nothing in the plan consumes."),
                 new TabBar.Tab("Imports", countReal(solved.rawInputs()),
-                        "What must come from outside: ores, water, anything the plan does not make.")),
+                        "What must come from outside: ores, water, anything the plan does not make."),
+                new TabBar.Tab("Machines", MachineTally.of(solved).size(),
+                        "Every machine the plan needs and how many, with what each one is built "
+                                + "from. The list below becomes the shopping list while this is "
+                                + "open.")),
                 selectedTab,
                 index -> {
                     selectedTab = index;
@@ -316,7 +334,7 @@ public final class PlannerScreen extends Screen {
         scroll.bounds(rightX, bodyY, rightWidth, Math.max(20, bodyHeight));
         this.tableWidth = scroll.viewportWidth();
 
-        this.table = buildTable();
+        this.table = selectedTab == MACHINES_TAB ? buildMachineTable() : buildTable();
         table.layout(tableWidth);
         scroll.content(table, table.contentHeight());
         widgets.add(scroll);
@@ -843,6 +861,131 @@ public final class PlannerScreen extends Screen {
         return built;
     }
 
+    // ------------------------------------------------------------- machines
+
+    private static final List<Table.Column> MACHINE_COLUMNS = List.of(
+            new Table.Column("Machine", 3.0f,
+                    "Every machine the plan runs on, most-needed first."),
+            new Table.Column("Need", 1.0f,
+                    "Machines needed across the whole plan, and how many to build. Two lines "
+                            + "wanting a fifth of a machine each want one machine between them, so "
+                            + "the fractions are added before they are rounded - which is not what "
+                            + "the per-line column does, and is the right answer for a bench."),
+            new Table.Column("Built from", 5.0f,
+                    "What one of these blocks costs to craft. The controller only: a multiblock's "
+                            + "casings, coils and hatches are not here."));
+
+    /**
+     * The shopping list: what the plan costs in machines, and what each machine costs in items.
+     *
+     * <p>Deliberately not a second solve. {@code MachineTally} reads the same {@link SolveResult}
+     * the table above is drawn from, so a machine count here and the same machine's count on its
+     * line cannot disagree — they are the same number added up a different way.
+     *
+     * <p>The parts list is a best effort and says so in its own tooltip. MFP finds what crafts a
+     * machine by asking the index what produces the machine's own item, which is right for the
+     * common case and can pick the wrong route for a machine with several; the recipe it chose is
+     * named in the tooltip so the answer can be checked rather than taken on faith.
+     */
+    private Table buildMachineTable() {
+        // Nothing here is draggable, and leaving the previous table's order in place would let a
+        // drag begun on the plan reorder lines that are no longer on screen.
+        this.displayedOrder = List.of();
+
+        Table built = new Table(MACHINE_COLUMNS);
+        for (MachineTally.MachineNeed need : MachineTally.of(plan.solveResult())) {
+            MfpMachine machine = ClientIndex.get().machine(need.machineId());
+            String name = machine == null ? need.machineId() : machine.displayName();
+            String subtitle = need.tier() < 0 ? "multiblock" : tierName(need.tier());
+
+            built.addRow(List.of(
+                    Cells.iconTwoLine(MachineStacks.icon(need.machineId()), name, Theme.TEXT,
+                            subtitle, machineNeedTooltip(need, machine)),
+                    Cells.text(Fmt.machines(need.count(), need.toBuild()), Theme.TEXT,
+                            List.of(Component.literal(Fmt.number(need.count())
+                                            + " needed, build " + need.toBuild())
+                                    .withStyle(ChatFormatting.WHITE))),
+                    partsCell(need)
+            ), 0);
+        }
+        return built;
+    }
+
+    private List<Component> machineNeedTooltip(MachineTally.MachineNeed need, MfpMachine machine) {
+        List<Component> lines = new ArrayList<>();
+        lines.add(Component.literal(need.machineId()).withStyle(ChatFormatting.WHITE));
+        if (machine != null && machine.multiblock()) {
+            lines.add(Component.literal("multiblock - the controller is what this row prices")
+                    .withStyle(ChatFormatting.GRAY));
+        }
+        lines.add(Component.literal(need.recipeIds().size() == 1 ? "for this line:" : "for these lines:")
+                .withStyle(ChatFormatting.GRAY));
+        for (String recipeId : need.recipeIds()) {
+            lines.add(Component.literal("- " + recipeId).withStyle(ChatFormatting.DARK_GRAY));
+        }
+        return lines;
+    }
+
+    /**
+     * What one of these machines is built from, priced for one block rather than for the whole row.
+     *
+     * <p>Per block because that is the number a player checks against what is in their inventory,
+     * and because a fractional machine count would otherwise turn a crafting grid into a decimal.
+     * The total for the whole row is one hover away, on each ingredient.
+     */
+    private Table.Cell partsCell(MachineTally.MachineNeed need) {
+        MfpRecipe source = MachineParts.recipeFor(need.machineId());
+        if (source == null) {
+            return Cells.text("unknown", Theme.TEXT_IDLE,
+                    List.of(Component.literal("Nothing MFP has indexed makes this machine.")
+                                    .withStyle(ChatFormatting.WHITE),
+                            Component.literal("Plenty of machines in a pack arrive by quest reward "
+                                    + "or from a mod no provider reads. An empty list is the honest "
+                                    + "answer; a guess would not be.")
+                                    .withStyle(ChatFormatting.GRAY)));
+        }
+
+        List<SlotWidget> slots = new ArrayList<>();
+        for (MfpIngredient ingredient : source.inputs()) {
+            MfpKey key = ingredient.primary();
+            double each = ingredient.amount();
+            List<Component> lines = new ArrayList<>(KeyStacks.tooltip(key,
+                    Fmt.number(each) + " per machine"));
+            lines.add(Component.literal(Fmt.number(each * need.toBuild()) + " for all "
+                    + need.toBuild()).withStyle(ChatFormatting.GRAY));
+            if (!ingredient.consumed()) {
+                // A programmed circuit costs nothing per craft and still has to be there and set,
+                // so it belongs on the list with the reason it looks free.
+                lines.add(Component.literal("not consumed - set it, do not spend it")
+                        .withStyle(ChatFormatting.DARK_GRAY));
+            }
+            if (ingredient.isAmbiguous()) {
+                lines.add(Component.literal("one of several accepted items")
+                        .withStyle(ChatFormatting.DARK_GRAY));
+            }
+            slots.add(SlotWidget.of(key, Fmt.number(each), List.copyOf(lines)));
+        }
+
+        List<Component> fallback = new ArrayList<>();
+        fallback.add(Component.literal(source.id()).withStyle(ChatFormatting.WHITE));
+        fallback.add(Component.literal("The route MFP thinks a player builds this by. It is chosen "
+                        + "from what the index says produces the machine's own item, and a machine "
+                        + "with several routes can be shown the wrong one.")
+                .withStyle(ChatFormatting.GRAY));
+        return Cells.orTooltip(Cells.flows(slots), List.copyOf(fallback));
+    }
+
+    private List<SlotWidget> machineSlots(SolveResult solved) {
+        List<SlotWidget> slots = new ArrayList<>();
+        for (MachineTally.MachineNeed need : MachineTally.of(solved)) {
+            MfpMachine machine = ClientIndex.get().machine(need.machineId());
+            slots.add(SlotWidget.stack(MachineStacks.icon(need.machineId()),
+                    String.valueOf(need.toBuild()),
+                    machineNeedTooltip(need, machine)));
+        }
+        return slots;
+    }
+
     // -------------------------------------------------------------- reordering
 
     /**
@@ -1181,6 +1324,7 @@ public final class PlannerScreen extends Screen {
         return switch (selectedTab) {
             case 1 -> slotsFor(solved.byproducts(), 1.0);
             case 2 -> importSlots(solved.rawInputs());
+            case 3 -> machineSlots(solved);
             default -> slotsFor(solved.products(), 1.0);
         };
     }
@@ -1251,6 +1395,7 @@ public final class PlannerScreen extends Screen {
         return switch (selectedTab) {
             case 1 -> "nothing surplus";
             case 2 -> "nothing imported";
+            case 3 -> "no machines";
             default -> "nothing produced";
         };
     }
