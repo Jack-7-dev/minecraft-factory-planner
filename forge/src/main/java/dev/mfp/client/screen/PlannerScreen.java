@@ -27,6 +27,7 @@ import dev.mfp.core.model.MfpKey;
 import dev.mfp.core.model.MfpMachine;
 import dev.mfp.core.model.MfpOutput;
 import dev.mfp.core.model.MfpRecipe;
+import dev.mfp.core.plan.Arithmetic;
 import dev.mfp.core.plan.DisplayOrder;
 import dev.mfp.core.plan.Line;
 import dev.mfp.core.plan.LineDecision;
@@ -73,7 +74,7 @@ public final class PlannerScreen extends Screen {
     private static final int LEFT_WIDTH = 132;
     private static final int STATUS_HEIGHT = 11;
     private static final int GAP = 4;
-    private static final int TARGET_WIDTH = 96;
+    private static final int TARGET_WIDTH = 118;
 
     /** Room under the plan list for its stats block: six rows of eleven pixels, and a gap. */
     private static final int STATS_HEIGHT = 68;
@@ -83,6 +84,19 @@ public final class PlannerScreen extends Screen {
 
     /** Kept across openings: display preferences the user should not have to set twice. */
     private static Timescale timescale = Timescale.PER_SECOND;
+
+    /**
+     * Whether a target is typed in bulk units: stacks for an item, buckets for a fluid.
+     *
+     * <p>Two flags rather than one, because the button belongs to the target it sits beside and the
+     * two units are not the same decision — a plan making steel plate from an oil chain is read in
+     * stacks and buckets at once, and a single toggle would take one away to give the other.
+     *
+     * <p>A display conversion, like {@link Timescale}: the plan stores items and millibuckets per
+     * second whichever way the box is showing them.
+     */
+    private static boolean itemsInStacks;
+    private static boolean fluidsInBuckets;
     private static boolean perMachine;
     private static int selectedTab;
 
@@ -557,6 +571,62 @@ public final class PlannerScreen extends Screen {
      * rather than on every keystroke: a re-solve per character would be both wasteful and confusing,
      * since "1", "12" and "125" are all valid rates and only the last one was meant.
      */
+    /**
+     * How many of the stored unit one typed unit is worth: 64 for stacks, 1000 for buckets, 1 flat.
+     *
+     * <p>Never zero. A key with no bulk unit at all — energy, computation — is typed in the unit it
+     * is stored in, and dividing a target by a factor of nothing is how a rate silently becomes
+     * infinite.
+     */
+    private static double unitFactor(MfpKey key) {
+        double perStack = KeyStacks.unitsPerStack(key);
+        if (perStack <= 0) {
+            return 1.0;
+        }
+        return switch (key.kind()) {
+            case ITEM -> itemsInStacks ? perStack : 1.0;
+            case FLUID -> fluidsInBuckets ? perStack : 1.0;
+            default -> 1.0;
+        };
+    }
+
+    /** What the box is showing, spelled out for a tooltip. */
+    private static String unitName(MfpKey key) {
+        return switch (key.kind()) {
+            case ITEM -> itemsInStacks ? "stacks" : "items";
+            case FLUID -> fluidsInBuckets ? "buckets" : "millibuckets";
+            default -> "units";
+        };
+    }
+
+    /** The same thing in the two or three characters the button has room for. */
+    private static String unitLabel(MfpKey key) {
+        return switch (key.kind()) {
+            case ITEM -> itemsInStacks ? "st" : "ea";
+            case FLUID -> fluidsInBuckets ? "B" : "mB";
+            default -> "-";
+        };
+    }
+
+    private static String unitTooltip(MfpKey key) {
+        String stackSize = Fmt.number(KeyStacks.unitsPerStack(key));
+        return switch (key.kind()) {
+            case ITEM -> "Typing in " + unitName(key) + " per second. Press to switch; a stack of "
+                    + "this is " + stackSize + ". The plan is stored in items either way.";
+            case FLUID -> "Typing in " + unitName(key) + " per second. Press to switch between "
+                    + "buckets and the millibuckets recipes are actually written in.";
+            default -> "This has no bulk unit to switch to.";
+        };
+    }
+
+    private static void cycleUnit(MfpKey key) {
+        switch (key.kind()) {
+            case ITEM -> itemsInStacks = !itemsInStacks;
+            case FLUID -> fluidsInBuckets = !fluidsInBuckets;
+            default -> { }
+        }
+    }
+
     private int buildTargets(int x, int y, int availableWidth) {
         List<TargetOutput> targets = plan.plan().targets();
         int cursorX = x;
@@ -577,20 +647,40 @@ public final class PlannerScreen extends Screen {
             icon.bounds(cursorX, cursorY, SlotWidget.ICON, SlotWidget.ICON);
             widgets.add(icon);
 
+            double perUnit = unitFactor(target.key());
+
             TextField rate = new TextField()
-                    .text(Fmt.number(target.perSecond()))
-                    .filter(TextField.NUMERIC)
-                    .maxLength(10)
-                    .tooltip("Wanted per second. Everything downstream is sized from this.")
+                    .text(Fmt.number(target.perSecond() / perUnit))
+                    .filter(Arithmetic::isExpressionChar)
+                    .maxLength(24)
+                    .tooltip("Wanted per second, in " + unitName(target.key())
+                            + ". Everything downstream is sized from this. Arithmetic is allowed: "
+                            + "type 8*0.25 or (3+1)/2 and the box works it out when you press Enter.")
                     .onCommit(value -> {
-                        double wanted = parseDouble(value, target.perSecond());
+                        double typed = Arithmetic.evaluate(value)
+                                .orElse(target.perSecond() / perUnit);
+                        double wanted = typed * perUnit;
                         if (wanted > 0 && wanted != target.perSecond()) {
                             plan.plan().setTarget(index, new TargetOutput(target.key(), wanted));
                             resolve();
+                        } else {
+                            // Nothing to re-solve, but the box may still be holding "8*0.25" — the
+                            // whole point of typing a sum is seeing the number it came to.
+                            rebuild();
                         }
                     });
-            rate.bounds(cursorX + SlotWidget.ICON + 2, cursorY + 1, 48, 14);
+            rate.bounds(cursorX + SlotWidget.ICON + 2, cursorY + 1, 46, 14);
             widgets.add(rate);
+
+            TextButton unit = new TextButton(unitLabel(target.key()), () -> {
+                cycleUnit(target.key());
+                rebuild();
+            });
+            unit.centred();
+            unit.tooltip(unitTooltip(target.key()));
+            unit.enabled(perUnit > 0 && KeyStacks.unitsPerStack(target.key()) > 0);
+            unit.bounds(rate.x() + rate.width() + 2, cursorY + 1, 22, 14);
+            widgets.add(unit);
 
             TextButton remove = new TextButton("X", () -> {
                 plan.plan().removeTarget(index);
@@ -598,7 +688,7 @@ public final class PlannerScreen extends Screen {
             });
             remove.centred();
             remove.tooltip("Stop asking for " + KeyStacks.name(target.key()).getString());
-            remove.bounds(cursorX + SlotWidget.ICON + 2 + 48 + 2, cursorY + 1, 12, 14);
+            remove.bounds(unit.x() + unit.width() + 2, cursorY + 1, 12, 14);
             widgets.add(remove);
 
             cursorX += TARGET_WIDTH;
