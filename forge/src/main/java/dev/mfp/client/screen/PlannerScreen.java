@@ -395,7 +395,7 @@ public final class PlannerScreen extends Screen {
         TextButton duplicate = new TextButton("Copy", () -> {
             ClientPlan current = ClientPlanner.current();
             if (current != null) {
-                ClientPlanner.add(current.plan().copy(current.plan().name() + " (copy)"));
+                ClientPlanner.add(current.plan().copy(copyName(current.plan())));
                 this.plan = ClientPlanner.current();
                 rebuild();
             }
@@ -462,6 +462,27 @@ public final class PlannerScreen extends Screen {
         }
         TargetOutput first = listed.targets().get(0);
         return KeyStacks.name(first.key()).getString() + " x" + Fmt.number(first.perSecond()) + "/s";
+    }
+
+    /**
+     * What the copy of a plan is called: the original's name, numbered.
+     *
+     * <p>A copy has to be named — an unnamed one would follow its own targets and the two would sit
+     * in the list under identical labels — but naming it after {@link Plan#name()} took the derived
+     * form, and the derived form is the raw key: copying "Ethanol x1000/s" produced a plan called
+     * {@code gtceu:ethanol x 1000/s} and froze it there. The list's own label is the name the user
+     * has been reading, so that is what the copy keeps, with the first free number after it.
+     */
+    private static String copyName(Plan original) {
+        String base = planLabel(original);
+        for (int suffix = 1; ; suffix++) {
+            String candidate = base + " (" + suffix + ")";
+            boolean taken = ClientPlanner.plans().stream()
+                    .anyMatch(existing -> planLabel(existing.plan()).equals(candidate));
+            if (!taken) {
+                return candidate;
+            }
+        }
     }
 
     /** The plan's end product, drawn the same way the Products column draws it. */
