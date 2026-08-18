@@ -86,6 +86,45 @@ public final class Cells {
     }
 
     /**
+     * A cell that explains itself wherever it is not already explaining something else.
+     *
+     * <p>For a column of flows that also stands for the row: hovering an item still gives that
+     * item's own tooltip, and hovering the space beside it gives the row's. Merging the two would
+     * mean every item in the plan carried a paragraph about the recipe it came out of, and dropping
+     * the fallback would mean a single-product line had nowhere to say what it is.
+     */
+    public static Table.Cell orTooltip(Table.Cell delegate, List<Component> fallback) {
+        return new FallbackTooltipCell(delegate, fallback);
+    }
+
+    private record FallbackTooltipCell(Table.Cell delegate, List<Component> fallback)
+            implements Table.Cell {
+
+        @Override
+        public int preferredHeight(int width) {
+            return delegate.preferredHeight(width);
+        }
+
+        @Override
+        public void render(GuiGraphics graphics, int x, int y, int width, int height,
+                           int mouseX, int mouseY) {
+            delegate.render(graphics, x, y, width, height, mouseX, mouseY);
+        }
+
+        @Override
+        public List<Component> tooltip(int x, int y, int width, int height, int mouseX, int mouseY) {
+            List<Component> own = delegate.tooltip(x, y, width, height, mouseX, mouseY);
+            return own.isEmpty() ? fallback : own;
+        }
+
+        @Override
+        public boolean mouseClicked(int x, int y, int width, int height,
+                                    double mouseX, double mouseY, int button) {
+            return delegate.mouseClicked(x, y, width, height, mouseX, mouseY, button);
+        }
+    }
+
+    /**
      * Any cell, made to respond to a left click over the whole of it.
      *
      * <p>A wrapper rather than a clickable variant of each cell kind, so a column can be made

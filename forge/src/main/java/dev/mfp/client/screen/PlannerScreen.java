@@ -607,12 +607,13 @@ public final class PlannerScreen extends Screen {
             new Table.Column("", 0.45f,
                     "Move a line up or down. Display order only - the solver's own order is "
                             + "topological and is not changed by this."),
-            new Table.Column("Recipe", 2.9f, "Click a recipe to see every other way of making it."),
-            new Table.Column("Machine", 2.1f, "Click to choose the machine, its tier and what is built into it."),
+            new Table.Column("Machine", 2.4f, "Click to choose the machine, its tier and what is built into it."),
             new Table.Column("Tier", 0.6f, "Click to configure the machine."),
             new Table.Column("Machines", 1.0f, "Fractional need, with the number to build in brackets."),
             new Table.Column("EU/t", 0.9f, "Drawn (-) and produced (+) by the whole line."),
-            new Table.Column("Products", 2.2f),
+            new Table.Column("Products", 2.6f,
+                    "What this line delivers. Hover it for the recipe behind it, and click it to "
+                            + "see every other way of making the same thing."),
             new Table.Column("Byproducts", 1.8f,
                     "Surplus this line makes. Empty under the matrix engine, which balances the "
                             + "plan as a whole - see the Byproducts tab."),
@@ -655,15 +656,18 @@ public final class PlannerScreen extends Screen {
                                     Component.literal("Display order only: the solver walks the plan "
                                             + "in its own order and this does not change any number.")
                                             .withStyle(ChatFormatting.GRAY))),
-                    Cells.clickable(
-                            Cells.text(pathOf(recipe.id()), textColour,
-                                    recipeTooltip(line, throughput, producedFor(recipe, result))),
-                            () -> openRecipePicker(recipe, result)),
                     machineCell,
                     Cells.clickable(tierCell(result, recipe, config), () -> openMachineConfig(line)),
                     machineCountCell(result, throughput),
                     energyCell(result),
-                    Cells.flows(slotsFor(result.outputs(), divisor)),
+                    // The recipe used to have a column of its own, showing its id. Almost nothing a
+                    // user decides depends on that string, and it cost the width the flows wanted, so
+                    // it moved here: the products are how a line is recognised anyway, and the recipe
+                    // behind them is a hover away and one click from being replaced.
+                    Cells.clickable(
+                            Cells.orTooltip(Cells.flows(slotsFor(result.outputs(), divisor)),
+                                    recipeTooltip(line, throughput, producedFor(recipe, result))),
+                            () -> openRecipePicker(recipe, result)),
                     byproductCell(result, divisor),
                     // The one column whose flows lead somewhere: an ingredient is a question about
                     // where it comes from, and clicking it is how the chain is built out (M11.2).
