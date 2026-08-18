@@ -46,9 +46,12 @@ import java.util.Map;
  * <p>This is not a power-user affordance. Automatic selection is good on material chains and
  * unreliable above them (STATUS §4b.16) — GregTech offers 431 ways to make a steel ingot and the
  * good ones are not distinguishable from the junk by anything visible in a single recipe — so this
- * dialog is the normal way a plan above raw materials gets built, which is why the reasons are on
- * screen rather than in a tooltip. "reversible conversion" and "recycles a used item" are precisely
- * what tells a user why the default was what it was, and whether to overrule it.
+ * dialog is the normal way a plan above raw materials gets built.
+ *
+ * <p>The scorer's own reasons used to have a column here, and no longer do. They explained a ranking
+ * the user is not being asked to audit: what is wanted from this screen is the machine, the rate and
+ * the ingredients, which is what a recipe is actually chosen on. The ordering they produced is still
+ * the order of the list.
  *
  * <p>Two different rejections, deliberately kept apart. <b>Pinning</b> another recipe says "use this
  * one here"; <b>hiding</b> says "never offer this recipe again in this plan", which also steers
@@ -58,17 +61,16 @@ import java.util.Map;
 public final class RecipePickerScreen extends ModalScreen {
 
     private static final List<Table.Column> COLUMNS = List.of(
-            new Table.Column("Machine", 2.8f,
+            new Table.Column("Machine", 3.2f,
                     "The machine that runs this recipe. The recipe's own id is in the row's "
                             + "tooltip: it identifies the row, but it rarely tells the user "
                             + "anything they wanted to know."),
-            new Table.Column("Makes", 1.5f),
-            new Table.Column("Rate", 1.0f,
+            new Table.Column("Makes", 1.7f),
+            new Table.Column("Rate", 1.2f,
                     "How much of this item one machine makes per second, on the machine and tier "
                             + "the plan would default to. This is what actually compares two "
                             + "recipes: a bigger batch over a longer cycle is not more throughput."),
-            new Table.Column("From", 2.6f),
-            new Table.Column("Why", 2.8f, "The scorer's own reasons, best first."));
+            new Table.Column("From", 3.2f));
 
     /**
      * How many ranked recipes are built into rows before the list stops and says so.
@@ -288,15 +290,14 @@ public final class RecipePickerScreen extends ModalScreen {
                                         Component.literal("They are ranked below these, not excluded.")
                                                 .withStyle(ChatFormatting.GRAY))),
                         Cells.text("", Theme.TEXT_IDLE),
-                        Cells.text("", Theme.TEXT_IDLE),
-                        Cells.text("", Theme.TEXT_IDLE),
                         Cells.button("Show all", Theme.TEXT,
                                 List.of(Component.literal("These are ranked lower, not excluded.")
                                         .withStyle(ChatFormatting.GRAY)),
                                 () -> {
                                     showAll = true;
                                     rebuild();
-                                })),
+                                }),
+                        Cells.text("", Theme.TEXT_IDLE)),
                 0, null);
     }
 
@@ -320,9 +321,7 @@ public final class RecipePickerScreen extends ModalScreen {
                                 ? Cells.clickable(Cells.flows(inputSlots(recipe)),
                                         () -> net.minecraft.client.Minecraft.getInstance().setScreen(
                                                 new IngredientChoiceScreen(this, recipe)))
-                                : Cells.flows(inputSlots(recipe)),
-                        Cells.text(String.join(", ", scored.reasons()), Theme.TEXT_DIM,
-                                reasonTooltip(scored))),
+                                : Cells.flows(inputSlots(recipe))),
                 background,
                 button -> {
                     if (button == 0 && Screen.hasShiftDown()) {
@@ -353,9 +352,7 @@ public final class RecipePickerScreen extends ModalScreen {
                                 List.of(Component.literal(recipe.id())
                                         .withStyle(ChatFormatting.WHITE))),
                         Cells.flows(outputSlots(recipe)),
-                        Cells.text("", Theme.TEXT_IDLE),
-                        Cells.flows(inputSlots(recipe)),
-                        Cells.button("Allow here", Theme.TEXT,
+                        Cells.button("Allow", Theme.TEXT,
                                 List.of(Component.literal("You blacklisted "
                                                 + KeyStacks.name(offender).getString())
                                                 .withStyle(ChatFormatting.GRAY),
@@ -368,7 +365,8 @@ public final class RecipePickerScreen extends ModalScreen {
                                     plan.allowItem(offender);
                                     ClientPlanner.refresh();
                                     rebuild();
-                                })),
+                                }),
+                        Cells.flows(inputSlots(recipe))),
                 0, null);
     }
 
@@ -380,15 +378,15 @@ public final class RecipePickerScreen extends ModalScreen {
                                 List.of(Component.literal(recipe.id())
                                         .withStyle(ChatFormatting.WHITE))),
                         Cells.flows(outputSlots(recipe)),
-                        Cells.text("", Theme.TEXT_IDLE),
-                        Cells.flows(inputSlots(recipe)),
                         Cells.button("Unhide", Theme.TEXT,
-                                List.of(Component.literal("Hidden in this plan. Press to let it be offered again.")
-                                        .withStyle(ChatFormatting.GRAY)), () -> {
-                            plan.unblacklistRecipe(recipe.id());
-                            ClientPlanner.refresh();
-                            rebuild();
-                        })),
+                                List.of(Component.literal("Hidden in this plan. Press to let it be "
+                                                + "offered again.").withStyle(ChatFormatting.GRAY)),
+                                () -> {
+                                    plan.unblacklistRecipe(recipe.id());
+                                    ClientPlanner.refresh();
+                                    rebuild();
+                                }),
+                        Cells.flows(inputSlots(recipe))),
                 0, null);
     }
 
@@ -608,16 +606,6 @@ public final class RecipePickerScreen extends ModalScreen {
                 .withStyle(ChatFormatting.GRAY));
         lines.add(Component.literal("shift + left click to make it your default everywhere")
                 .withStyle(ChatFormatting.GRAY));
-        return lines;
-    }
-
-    private static List<Component> reasonTooltip(RecipeScorer.Scored scored) {
-        List<Component> lines = new ArrayList<>();
-        lines.add(Component.literal("why this ranks where it does").withStyle(ChatFormatting.WHITE));
-        scored.reasons().forEach(reason ->
-                lines.add(Component.literal("- " + reason).withStyle(ChatFormatting.GRAY)));
-        // The score itself is deliberately not shown: it is only meaningful within one comparison,
-        // and a number invites the user to read a precision the scorer does not claim.
         return lines;
     }
 
