@@ -20,17 +20,29 @@ import java.util.Arrays;
  * <h2>Termination</h2>
  * Dantzig pricing (most negative reduced cost) converges quickly but can cycle on a degenerate
  * problem, and production plans are degenerate constantly — every line that solves to exactly zero
- * is a degenerate vertex. So pricing switches to <b>Bland's rule</b> after {@link #BLAND_AFTER}
- * iterations, which is slower but provably terminates. Ratio-test ties always break on the lowest
- * basic variable index, which is Bland's rule for leaving and also what makes the answer the same
- * every run — a plan that solved differently on reload would be worse than one that solved slowly.
+ * is a degenerate vertex. So pricing switches to <b>Bland's rule</b>, which is slower but provably
+ * terminates, and switches back once the programme is moving again.
+ *
+ * <p><b>The switch is on stalling, not on a pivot count</b>, and the difference is the difference
+ * between answering a pack plan and not. It used to flip permanently after
+ * {@link #BLAND_AFTER} pivots, which is fine for a plan of twenty lines and fatal for one of nine
+ * hundred: 200 pivots is nothing on a thousand-row tableau, so every large plan spent its whole
+ * budget under the slowest available rule and hit the iteration cap instead of an optimum. A pack
+ * plan for one LuV electric motor — 931 lines — gave up after 20,000 pivots and four seconds, and
+ * fell back to the single pass, which reported 7.6e10 EU/s. Cycling needs an unbroken run of
+ * degenerate pivots, so an unbroken run of degenerate pivots is exactly and only when Bland's rule
+ * is needed; a pivot that actually moves ends the run and hands pricing back to Dantzig.
+ *
+ * <p>Ratio-test ties always break on the lowest basic variable index, which is Bland's rule for
+ * leaving and also what makes the answer the same every run — a plan that solved differently on
+ * reload would be worse than one that solved slowly.
  */
 final class Simplex {
 
     /** Below this a coefficient is treated as zero. Rows arrive scaled, so it is a relative one. */
     static final double TOLERANCE = 1e-9;
 
-    /** Iterations of Dantzig pricing before switching to the slower rule that cannot cycle. */
+    /** Consecutive degenerate pivots before switching to the slower rule that cannot cycle. */
     private static final int BLAND_AFTER = 200;
 
     /** A backstop, so a pathological problem fails rather than hanging the client thread. */
@@ -50,6 +62,8 @@ final class Simplex {
     private final int[] basis;
     private final boolean[] blocked;
     private int iterations;
+    /** How many pivots in a row have moved nothing, which is the only way a simplex can cycle. */
+    private int stalled;
 
     /**
      * @param a          {@code rows} by {@code columns}
@@ -94,6 +108,7 @@ final class Simplex {
             if (leaving < 0) {
                 throw new NoAnswerException("the problem is unbounded in column " + entering);
             }
+            stalled = tableau[leaving][columns] > TOLERANCE ? 0 : stalled + 1;
             pivot(leaving, entering);
             if (++iterations > MAX_ITERATIONS) {
                 throw new NoAnswerException("no optimum after " + MAX_ITERATIONS + " pivots");
@@ -147,6 +162,7 @@ final class Simplex {
         this.basis = source.basis.clone();
         this.blocked = source.blocked.clone();
         this.iterations = source.iterations;
+        this.stalled = source.stalled;
     }
 
     /**
@@ -237,7 +253,7 @@ final class Simplex {
     }
 
     private int choose(double[] reduced) {
-        boolean bland = iterations >= BLAND_AFTER;
+        boolean bland = stalled >= BLAND_AFTER;
         int best = -1;
         double bestValue = -TOLERANCE;
         for (int column = 0; column < columns; column++) {
