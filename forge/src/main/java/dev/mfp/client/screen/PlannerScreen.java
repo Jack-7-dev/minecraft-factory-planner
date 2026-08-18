@@ -75,7 +75,7 @@ public final class PlannerScreen extends Screen {
     private static final int LEFT_WIDTH = 132;
     private static final int STATUS_HEIGHT = 11;
     private static final int GAP = 4;
-    private static final int TARGET_WIDTH = 118;
+    private static final int TARGET_WIDTH = 148;
 
     /** Room under the plan list for its stats block: six rows of eleven pixels, and a gap. */
     private static final int STATS_HEIGHT = 68;
@@ -98,6 +98,17 @@ public final class PlannerScreen extends Screen {
      */
     private static boolean itemsInStacks;
     private static boolean fluidsInBuckets;
+
+    /**
+     * Which second the target boxes are counting per.
+     *
+     * <p>The same display conversion as the amount unit and the table's own Rate button, and kept
+     * apart from both: a plan is thought about in whatever unit its bottleneck is quoted in, and
+     * "twelve plates a minute" is how a player states a goal far more often than "0.2 a second".
+     * Only PER_SECOND and PER_MINUTE are reachable — stacks per minute is the amount unit's job,
+     * and offering it here as well would let the same box mean two different numbers.
+     */
+    private static Timescale targetTimescale = Timescale.PER_SECOND;
 
     /**
      * How much of Minecraft's own GUI scale the planner undoes.
@@ -667,10 +678,10 @@ public final class PlannerScreen extends Screen {
     private static String unitTooltip(MfpKey key) {
         String stackSize = Fmt.number(KeyStacks.unitsPerStack(key));
         return switch (key.kind()) {
-            case ITEM -> "Typing in " + unitName(key) + " per second. Press to switch; a stack of "
-                    + "this is " + stackSize + ". The plan is stored in items either way.";
-            case FLUID -> "Typing in " + unitName(key) + " per second. Press to switch between "
-                    + "buckets and the millibuckets recipes are actually written in.";
+            case ITEM -> "Typing in " + unitName(key) + ". Press to switch; a stack of this is "
+                    + stackSize + ". The plan is stored in items either way.";
+            case FLUID -> "Typing in " + unitName(key) + ". Press to switch between buckets and the "
+                    + "millibuckets recipes are actually written in.";
             default -> "This has no bulk unit to switch to.";
         };
     }
@@ -703,13 +714,16 @@ public final class PlannerScreen extends Screen {
             icon.bounds(cursorX, cursorY, SlotWidget.ICON, SlotWidget.ICON);
             widgets.add(icon);
 
-            double perUnit = unitFactor(target.key());
+            // One factor for both display conversions, so the box and its commit cannot disagree
+            // about what the number in it means. Never zero: unitFactor floors at one and a
+            // timescale's factor is 1 or 60.
+            double perUnit = unitFactor(target.key()) / targetTimescale.apply(1.0);
 
             TextField rate = new TextField()
                     .text(Fmt.number(target.perSecond() / perUnit))
                     .filter(Arithmetic::isExpressionChar)
                     .maxLength(24)
-                    .tooltip("Wanted per second, in " + unitName(target.key())
+                    .tooltip("Wanted in " + unitName(target.key()) + targetTimescale.suffix()
                             + ". Everything downstream is sized from this. Arithmetic is allowed: "
                             + "type 8*0.25 or (3+1)/2 and the box works it out when you press Enter.")
                     .onCommit(value -> {
@@ -738,13 +752,25 @@ public final class PlannerScreen extends Screen {
             unit.bounds(rate.x() + rate.width() + 2, cursorY + 1, 22, 14);
             widgets.add(unit);
 
+            TextButton per = new TextButton(targetTimescale.suffix(), () -> {
+                targetTimescale = targetTimescale == Timescale.PER_SECOND
+                        ? Timescale.PER_MINUTE : Timescale.PER_SECOND;
+                rebuild();
+            });
+            per.centred();
+            per.tooltip("Per second or per minute. A display conversion only, like the unit beside "
+                    + "it: the plan is stored per second whichever this says, and nothing is "
+                    + "re-solved by pressing it.");
+            per.bounds(unit.x() + unit.width() + 2, cursorY + 1, 26, 14);
+            widgets.add(per);
+
             TextButton remove = new TextButton("X", () -> {
                 plan.plan().removeTarget(index);
                 resolve();
             });
             remove.centred();
             remove.tooltip("Stop asking for " + KeyStacks.name(target.key()).getString());
-            remove.bounds(unit.x() + unit.width() + 2, cursorY + 1, 12, 14);
+            remove.bounds(per.x() + per.width() + 2, cursorY + 1, 12, 14);
             widgets.add(remove);
 
             cursorX += TARGET_WIDTH;
