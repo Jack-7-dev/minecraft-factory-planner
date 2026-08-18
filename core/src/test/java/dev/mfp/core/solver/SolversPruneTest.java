@@ -96,6 +96,37 @@ class SolversPruneTest {
         assertEquals(4, plan.allLines().size());
     }
 
+    /**
+     * A line is not dead because the answer decided to buy what it makes.
+     *
+     * <p>Declaring the plate raw makes buying one cheaper than making it from two raw ingots, so the
+     * plate line solves to zero — and its product is on the shopping list. Deleting it would leave a
+     * plan that says "plates are bought" with nothing left to say the plan had a way to make them,
+     * and the user's own reason for it (they declared the plate raw) invisible.
+     *
+     * <p>The pack case behind it: the polyvinyl butyral chain expands to 42 lines, the engine relaxes
+     * butyraldehyde into an import, 39 lines go idle behind it, and pruning them turned a whole
+     * chemistry tree into a three-line plan buying its own intermediates. The re-solve also loses the
+     * warning that explained why, because in the pruned plan nothing produces those items at all.
+     */
+    @Test
+    @DisplayName("a line whose product the answer buys is kept, not pruned")
+    void aLineWhoseProductIsBoughtIsNotDead() {
+        Plan plan = new Plan("bought").target(CASING, 1.0).solverMode(SolverMode.SIMPLEX);
+        plan.add(new Line(Fixtures.casing()));
+        plan.add(new Line(Fixtures.plate()));
+        plan.rawMaterial(Fixtures.PLATE);
+        plan.rawMaterial(Fixtures.INGOT);
+
+        SolveResult result = Solvers.solve(plan);
+
+        assertEquals(2, result.lines().size(), "the line stays: " + result.warnings());
+        assertEquals(2, plan.allLines().size());
+        assertTrue(result.lines().get(1).isIdle(), "and it is visibly doing nothing");
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("mfp:plate")),
+                "and the plan says which ingredient it would have to buy: " + result.warnings());
+    }
+
     @Test
     @DisplayName("nothing is removed twice, so the reported count is a count of real removals")
     void removingWhatIsNotThereRemovesNothing() {

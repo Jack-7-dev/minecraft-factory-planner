@@ -2,6 +2,7 @@ package dev.mfp.core.solver;
 
 import dev.mfp.core.model.Confidence;
 import dev.mfp.core.model.MfpKey;
+import dev.mfp.core.model.MfpOutput;
 import dev.mfp.core.plan.Line;
 import dev.mfp.core.plan.LineNode;
 import dev.mfp.core.plan.MachineConfig;
@@ -99,14 +100,18 @@ public final class Solvers {
         int dropped = plan.removeLines(dead);
         SolveResult pruned = solveOnce(plan, resolver);
         List<MfpKey> appeared = newImports(pruned, result);
-        if (dropped > 0 && appeared.isEmpty()) {
+        List<MfpKey> bought = alsoMadeByTheRemovedLines(dead, pruned);
+        if (dropped > 0 && appeared.isEmpty() && bought.isEmpty()) {
             return withNote(pruned, dropped);
         }
         plan.root().clear().addAll(before);
         // Why the row is still there, in the one place a user will look for it. "This line does
         // nothing" invites deleting it by hand; "removing it makes the plan buy its own ingredient"
         // is the fact that stops them, and naming the ingredient gives the next question an answer.
-        return appeared.isEmpty() ? result : withKeptNote(result, appeared);
+        if (!appeared.isEmpty()) {
+            return withKeptNote(result, appeared);
+        }
+        return bought.isEmpty() ? result : withKeptNote(result, bought);
     }
 
     /**
@@ -125,6 +130,36 @@ public final class Solvers {
             }
         }
         return appeared;
+    }
+
+    /**
+     * What the removed lines make that the answer is buying anyway.
+     *
+     * <p>The second half of the guard, and the half {@link #newImports} cannot see. That one asks
+     * whether pruning <em>started</em> an import; this asks whether the lines being taken out are the
+     * plan's way of making something already on the shopping list. If they are, the answer to
+     * "nothing in the plan demanded anything they make" is that something did, and what the engine
+     * really decided was to buy it instead — a decision that belongs on the screen rather than in a
+     * deletion.
+     *
+     * <p>Found on the pack's polyvinyl butyral chain, which expands to 42 lines: the engine could
+     * not balance butyraldehyde, relaxed it into an import, and 39 lines went idle behind it.
+     * Pruning them left a three-line plan importing two intermediates it had a whole chemistry
+     * tree for, and — because the pruned plan re-solves from scratch, and in it those items have no
+     * producer at all — the warning explaining why they were bought did not survive either. A plan
+     * that quietly says "butyraldehyde is a raw material" is exactly the confidently wrong answer
+     * this project's first principle is about.
+     */
+    private static List<MfpKey> alsoMadeByTheRemovedLines(List<Line> removed, SolveResult pruned) {
+        List<MfpKey> bought = new ArrayList<>();
+        for (Line line : removed) {
+            for (MfpOutput output : line.recipe().outputs()) {
+                if (pruned.rawInputs().containsKey(output.key()) && !bought.contains(output.key())) {
+                    bought.add(output.key());
+                }
+            }
+        }
+        return bought;
     }
 
     private static SolveResult withKeptNote(SolveResult result, List<MfpKey> appeared) {
