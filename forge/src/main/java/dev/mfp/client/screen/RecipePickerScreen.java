@@ -58,15 +58,17 @@ import java.util.Map;
 public final class RecipePickerScreen extends ModalScreen {
 
     private static final List<Table.Column> COLUMNS = List.of(
-            new Table.Column("Recipe", 2.6f),
-            new Table.Column("Makes", 1.4f),
-            new Table.Column("Rate", 0.9f,
+            new Table.Column("Machine", 2.8f,
+                    "The machine that runs this recipe. The recipe's own id is in the row's "
+                            + "tooltip: it identifies the row, but it rarely tells the user "
+                            + "anything they wanted to know."),
+            new Table.Column("Makes", 1.5f),
+            new Table.Column("Rate", 1.0f,
                     "How much of this item one machine makes per second, on the machine and tier "
                             + "the plan would default to. This is what actually compares two "
                             + "recipes: a bigger batch over a longer cycle is not more throughput."),
-            new Table.Column("From", 2.4f),
-            new Table.Column("Why", 2.4f, "The scorer's own reasons, best first."),
-            new Table.Column("", 1.0f));
+            new Table.Column("From", 2.6f),
+            new Table.Column("Why", 2.8f, "The scorer's own reasons, best first."));
 
     /**
      * How many ranked recipes are built into rows before the list stops and says so.
@@ -288,11 +290,13 @@ public final class RecipePickerScreen extends ModalScreen {
                         Cells.text("", Theme.TEXT_IDLE),
                         Cells.text("", Theme.TEXT_IDLE),
                         Cells.text("", Theme.TEXT_IDLE),
-                        Cells.text("lower ranked", Theme.TEXT_IDLE),
-                        Cells.button("Show all", Theme.TEXT, List.of(), () -> {
-                            showAll = true;
-                            rebuild();
-                        })),
+                        Cells.button("Show all", Theme.TEXT,
+                                List.of(Component.literal("These are ranked lower, not excluded.")
+                                        .withStyle(ChatFormatting.GRAY)),
+                                () -> {
+                                    showAll = true;
+                                    rebuild();
+                                })),
                 0, null);
     }
 
@@ -306,7 +310,7 @@ public final class RecipePickerScreen extends ModalScreen {
 
         into.addRow(List.of(
                         Cells.iconTwoLine(MachineStacks.iconForRecipeType(recipe.recipeTypeId()),
-                                pathOf(recipe.id()), colour,
+                                MachineStacks.shortName(recipe.recipeTypeId()), colour,
                                 (isStanding ? "your default  -  " : "")
                                         + recipe.recipeTypeId() + durationSuffix(recipe),
                                 recipeTooltip(recipe, scored)),
@@ -318,13 +322,7 @@ public final class RecipePickerScreen extends ModalScreen {
                                                 new IngredientChoiceScreen(this, recipe)))
                                 : Cells.flows(inputSlots(recipe)),
                         Cells.text(String.join(", ", scored.reasons()), Theme.TEXT_DIM,
-                                reasonTooltip(scored)),
-                        Cells.button(isPinned ? "Pinned" : "Pin", isPinned ? Theme.PINNED : Theme.TEXT,
-                                List.of(Component.literal(isPinned
-                                                ? "This recipe is pinned for " + key
-                                                : "Use this recipe for " + key + " and re-solve")
-                                        .withStyle(ChatFormatting.GRAY)),
-                                () -> pin(recipe))),
+                                reasonTooltip(scored))),
                 background,
                 button -> {
                     if (button == 0 && Screen.hasShiftDown()) {
@@ -350,19 +348,20 @@ public final class RecipePickerScreen extends ModalScreen {
     private void addBlockedRow(Table into, MfpRecipe recipe, MfpKey offender) {
         into.addRow(List.of(
                         Cells.iconTwoLine(MachineStacks.iconForRecipeType(recipe.recipeTypeId()),
-                                pathOf(recipe.id()), Theme.TEXT_IDLE,
-                                "needs " + KeyStacks.name(offender).getString(), List.of()),
+                                MachineStacks.shortName(recipe.recipeTypeId()), Theme.TEXT_IDLE,
+                                "needs " + KeyStacks.name(offender).getString(),
+                                List.of(Component.literal(recipe.id())
+                                        .withStyle(ChatFormatting.WHITE))),
                         Cells.flows(outputSlots(recipe)),
                         Cells.text("", Theme.TEXT_IDLE),
                         Cells.flows(inputSlots(recipe)),
-                        Cells.text("blacklisted input", Theme.TEXT_IDLE,
+                        Cells.button("Allow here", Theme.TEXT,
                                 List.of(Component.literal("You blacklisted "
                                                 + KeyStacks.name(offender).getString())
                                                 .withStyle(ChatFormatting.GRAY),
                                         Component.literal("so every recipe consuming it is out of "
-                                                + "consideration.").withStyle(ChatFormatting.GRAY))),
-                        Cells.button("Allow here", Theme.TEXT,
-                                List.of(Component.literal("Use " + KeyStacks.name(offender).getString()
+                                                + "consideration.").withStyle(ChatFormatting.GRAY),
+                                        Component.literal("Use " + KeyStacks.name(offender).getString()
                                                 + " in this plan only")
                                         .withStyle(ChatFormatting.GRAY)),
                                 () -> {
@@ -376,12 +375,16 @@ public final class RecipePickerScreen extends ModalScreen {
     private void addHiddenRow(Table into, MfpRecipe recipe) {
         into.addRow(List.of(
                         Cells.iconTwoLine(MachineStacks.iconForRecipeType(recipe.recipeTypeId()),
-                                pathOf(recipe.id()), Theme.TEXT_IDLE, "hidden in this plan", List.of()),
+                                MachineStacks.shortName(recipe.recipeTypeId()), Theme.TEXT_IDLE,
+                                "hidden in this plan",
+                                List.of(Component.literal(recipe.id())
+                                        .withStyle(ChatFormatting.WHITE))),
                         Cells.flows(outputSlots(recipe)),
                         Cells.text("", Theme.TEXT_IDLE),
                         Cells.flows(inputSlots(recipe)),
-                        Cells.text("hidden", Theme.TEXT_IDLE),
-                        Cells.button("Unhide", Theme.TEXT, List.of(), () -> {
+                        Cells.button("Unhide", Theme.TEXT,
+                                List.of(Component.literal("Hidden in this plan. Press to let it be offered again.")
+                                        .withStyle(ChatFormatting.GRAY)), () -> {
                             plan.unblacklistRecipe(recipe.id());
                             ClientPlanner.refresh();
                             rebuild();
@@ -496,13 +499,17 @@ public final class RecipePickerScreen extends ModalScreen {
      * <p>The plan's own pin for this key is dropped at the same time. Leaving it would mean the row
      * carried two marks saying the same thing, and the next time the user cleared the pin — expecting
      * to go back to the scorer — nothing would appear to happen.
+     *
+     * <p>Then it closes, exactly as pinning does. Declaring a default is also a decision about the
+     * plan on screen, and leaving the user in the picker made them scroll back down and click the
+     * same row a second time to get the recipe they had just called their usual one.
      */
     private void makeDefault(MfpRecipe recipe) {
         preferences().defaultRecipe(key, recipe.id());
         plan.clearRecipeChoice(key);
         PreferenceStore.save();
         ClientPlanner.refresh();
-        rebuild();
+        back();
     }
 
     /** The one live instance; the Defaults screen and the commands edit the same object. */
