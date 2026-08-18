@@ -94,6 +94,30 @@ public final class SimplexSolver {
     /** How many items may be relaxed before giving up; one round frees at least one. */
     private static final int MAX_RELAXATIONS = 64;
 
+    /**
+     * How many lines this engine will attempt, above which it declines rather than grinding.
+     *
+     * <p>Measured against the pack rather than reasoned about, because the tableau is dense and the
+     * cost is in the pivots rather than in the size of the array:
+     *
+     * <pre>
+     *   96 lines    3.1 ms   solved
+     *   266 lines    84 ms   solved
+     *   878 lines   3.8 s    gave up after 20,000 pivots
+     *   1239 lines  13.4 s   gave up after 20,000 pivots
+     * </pre>
+     *
+     * <p>Above the line the answer is the sequential pass's either way, so the only question is
+     * whether the user waits four seconds to be told. The matrix engine reaches the same conclusion
+     * on the same plan in 96 ms, which is what this number buys back.
+     *
+     * <p>It is a judgement, like {@code RecipeChooser.PROBE_LINE_LIMIT}, and it is the honest form of
+     * one: nothing measured sits near it, the two failures are three and five times past it, and the
+     * largest plan seen to solve is less than half of it. The real answer is an engine that scales —
+     * a sparse or revised simplex — and that is a piece of work, not a constant.
+     */
+    private static final int MAX_LINES = 600;
+
     private final ColumnBuilder builder;
 
     public SimplexSolver() {
@@ -105,6 +129,16 @@ public final class SimplexSolver {
     }
 
     public SolveResult solve(Plan plan) {
+        int active = 0;
+        for (Line line : plan.allLines()) {
+            if (line.active()) {
+                active++;
+            }
+        }
+        if (active > MAX_LINES) {
+            throw new IllegalStateException("this plan has " + active + " lines, beyond the "
+                    + MAX_LINES + " the simplex engine answers in reasonable time");
+        }
         List<String> warnings = new ArrayList<>();
         List<Column> columns = new ArrayList<>();
         List<IdleLine> idle = new ArrayList<>();
