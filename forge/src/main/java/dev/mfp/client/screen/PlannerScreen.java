@@ -796,7 +796,9 @@ public final class PlannerScreen extends Screen {
                             + "see every other way of making the same thing."),
             new Table.Column("Machine", 2.4f, "Click to choose the machine, its tier and what is built into it."),
             new Table.Column("Tier", 0.6f, "Click to configure the machine."),
-            new Table.Column("Machines", 1.0f, "Fractional need, with the number to build in brackets."),
+            new Table.Column("Machines", 1.0f,
+                    "Fractional need, with the number to build in brackets. Click it to size the "
+                            + "whole plan around a whole number of these machines instead."),
             new Table.Column("EU/t", 0.9f, "Drawn (-) and produced (+) by the whole line."),
             new Table.Column("Byproducts", 1.8f,
                     "Surplus this line makes. Empty under the matrix engine, which balances the "
@@ -850,7 +852,7 @@ public final class PlannerScreen extends Screen {
                             () -> openRecipePicker(recipe, result)),
                     machineCell,
                     Cells.clickable(tierCell(result, recipe, config), () -> openMachineConfig(line)),
-                    machineCountCell(result, throughput),
+                    scalableMachineCell(result, throughput, line),
                     energyCell(result),
                     byproductCell(result, divisor),
                     // The one column whose flows lead somewhere: an ingredient is a question about
@@ -1148,7 +1150,27 @@ public final class PlannerScreen extends Screen {
                 new MachineConfigScreen(this, line.recipe(), line.machine()));
     }
 
-    private Table.Cell machineCountCell(LineResult result, ThroughputResult throughput) {
+    /**
+     * The machine count, and the click that turns it into a decision.
+     *
+     * <p>2.60 towers is not a factory anybody builds: they place three and live with whatever three
+     * make. Clicking the number is how that gets said — pick a whole number of machines and a build
+     * for them, and the plan is resized around it (M12). Only where there is a rate to scale from:
+     * a line that cannot run, or that nothing demands, has no machine count to multiply, and a cell
+     * that highlights and then explains why it did nothing is worse than one that never invited the
+     * click.
+     */
+    private Table.Cell scalableMachineCell(LineResult result, ThroughputResult throughput, Line line) {
+        boolean scalable = !throughput.cancelled() && !result.isIdle() && result.machineCount() > 0;
+        Table.Cell cell = machineCountCell(result, throughput, scalable);
+        return scalable
+                ? Cells.clickable(cell, () ->
+                        Minecraft.getInstance().setScreen(new MachineScaleScreen(this, line)))
+                : cell;
+    }
+
+    private Table.Cell machineCountCell(LineResult result, ThroughputResult throughput,
+                                       boolean scalable) {
         if (throughput.cancelled()) {
             return Cells.text("cannot run", Theme.ERROR,
                     List.of(Component.literal("This machine cannot run this recipe")
@@ -1164,6 +1186,10 @@ public final class PlannerScreen extends Screen {
         List<Component> lines = new ArrayList<>();
         lines.add(Component.literal(Fmt.number(result.machineCount()) + " machines needed, build "
                 + result.machinesToBuild()).withStyle(ChatFormatting.WHITE));
+        if (scalable) {
+            lines.add(Component.literal("click to build a whole number of them and resize the plan")
+                    .withStyle(ChatFormatting.YELLOW));
+        }
         lines.add(Component.literal(Fmt.rate(result.craftsPerSecond(), timescale) + " crafts")
                 .withStyle(ChatFormatting.GRAY));
         lines.add(Component.literal("confidence: " + result.confidence())
