@@ -220,14 +220,13 @@ class SimplexSolverTest {
     @Test
     void aLeakyLoopBuysWhatTheLoopLosesInsteadOfFailing() {
         SolveResult result = solver.solve(leakyLoopPlan());
-        SolveResult matrix = new MatrixSolver().solve(leakyLoopPlan());
 
+        // The numbers the matrix engine's single-item relaxation used to reach by searching, before
+        // M12 retired it: 0.25/s of concentrate freed rather than 0.5/s of acid, ore at 0.75/s.
+        // Phase one names the same item without trying anything.
         assertEquals(1.0, result.products().get(Loop.METAL), TOLERANCE);
         assertEquals(0.25, result.rawInputs().get(Loop.CONCENTRATE), TOLERANCE);
         assertEquals(0.75, result.rawInputs().get(ORE), TOLERANCE);
-        assertEquals(matrix.rawInputs().get(ORE), result.rawInputs().get(ORE), TOLERANCE);
-        assertEquals(matrix.rawInputs().get(Loop.CONCENTRATE),
-                result.rawInputs().get(Loop.CONCENTRATE), TOLERANCE);
         assertTrue(result.warnings().stream().anyMatch(w -> w.contains("concentrate")),
                 "the item that stopped balancing must be named: " + result.warnings());
         assertTrue(result.isComplete());

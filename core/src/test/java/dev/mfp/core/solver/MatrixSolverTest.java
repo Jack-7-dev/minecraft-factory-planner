@@ -89,28 +89,32 @@ class MatrixSolverTest {
     }
 
     /**
-     * A leaky loop is over-constrained, and the engine now frees the item itself.
+     * A leaky loop is over-constrained, and this engine now says so rather than patching it.
      *
      * <p>Leaching takes 2 acid and refining returns only 1.5, so "acid nets to zero" and "one
      * concentrate per metal" cannot both hold. That is a real contradiction rather than a solver
-     * limitation — the plan as written says the acid comes from nowhere — and until M6d it was
-     * reported as unsolvable, leaving the sequential pass to answer instead.
+     * limitation — the plan as written says the acid comes from nowhere.
      *
-     * <p>It answered badly. The same shape in the pack is a multi-output centrifuge whose essences
-     * cannot be consumed in the ratio it makes them, and the fallback sized that plan at thirty
-     * thousand centrifuges. Since the fix is the one the diagnosis already named — let the item be
-     * imported or exported — the engine now does it, once, and says which items it did it to. The
-     * numbers are identical to freeing the item by hand, which is the property that makes the
-     * automatic version defensible.
+     * <p>This engine used to answer it by freeing one item at a time and keeping whichever attempt
+     * leaked least. M12 retired that (PLAN §13a item 3): the ranking compared raw flows across
+     * different items, which is not a comparison, and on the pack's polyvinyl butyral chain it chose
+     * to throw away 99.6% of the plan's own ethylene. The condition belongs to the simplex engine,
+     * which allows over-production by construction, and {@code Solvers} routes it there — so the
+     * answer the user gets is unchanged, down to the last figure, and no longer comes from a search.
      */
     @Test
-    void aLeakyLoopFreesTheDeadlockedItemAndSaysSo() {
-        SolveResult relaxed = solver.solve(leakyLoopPlan());
+    void aLeakyLoopIsRaisedForTheEngineThatOwnsIt() {
+        MatrixSolver.UnsolvableSystemException failure = assertThrows(
+                MatrixSolver.UnsolvableSystemException.class,
+                () -> solver.solve(leakyLoopPlan()));
+        assertTrue(failure.isOverConstrained(), failure.getMessage());
 
-        // Concentrate, not acid: freeing it leaks 0.25/s where freeing acid leaks 0.5/s, and the
-        // rule is the least intervention that makes the plan describable. Either is a correct
-        // answer to an over-constrained system; what matters is that one is chosen, named, and the
-        // target still balances exactly.
+        // Concentrate, not acid: freeing it leaks 0.25/s where freeing acid leaks 0.5/s, and that is
+        // the least intervention that makes the plan describable. The search here and phase one of
+        // the simplex arrived at the same one, which is why retiring the search costs nothing.
+        SolveResult relaxed = Solvers.solve(leakyLoopPlan().solverMode(SolverMode.MATRIX));
+
+        assertEquals(SolverMode.SIMPLEX, relaxed.engine());
         assertEquals(1.0, relaxed.products().get(Loop.METAL), TOLERANCE);
         assertEquals(0.25, relaxed.rawInputs().get(Loop.CONCENTRATE), TOLERANCE);
         assertEquals(0.75, relaxed.rawInputs().get(ORE), TOLERANCE);

@@ -82,28 +82,25 @@ public final class MatrixSolver {
 
         private final List<String> diagnostics;
         private final boolean overConstrained;
-        private final List<MfpKey> conflicting;
 
-        UnsolvableSystemException(String message, List<String> diagnostics, boolean overConstrained,
-                                  List<MfpKey> conflicting) {
+        UnsolvableSystemException(String message, List<String> diagnostics, boolean overConstrained) {
             super(message + ": " + String.join("; ", diagnostics));
             this.diagnostics = List.copyOf(diagnostics);
             this.overConstrained = overConstrained;
-            this.conflicting = List.copyOf(conflicting);
-        }
-
-        /** The items the deadlock is between, which is what relaxing has to choose from. */
-        public List<MfpKey> conflicting() {
-            return conflicting;
         }
 
         /**
          * Whether the plan asks for too much rather than too little.
          *
-         * <p>The two failures need opposite fixes: an over-constrained plan is relieved by letting
-         * an item be imported or exported, while an ambiguous one needs a line removed. Freeing an
-         * item in the ambiguous case only makes it more ambiguous, so the distinction is worth
-         * carrying rather than re-deriving.
+         * <p>The two failures need opposite fixes, and the fix is no longer this engine's to apply:
+         * an over-constrained plan goes to the simplex engine, which allows over-production by
+         * construction, and an ambiguous one is a plan with more than one answer whichever engine
+         * looks at it. Carrying the distinction is what lets {@code Solvers} tell those apart
+         * without re-deriving it from a message.
+         *
+         * <p>The list of items the deadlock was between went with the relaxation that used to choose
+         * one of them (M12 item 3). It is still in the diagnosis the user reads; nothing in the code
+         * has any business picking from it.
          */
         public boolean isOverConstrained() {
             return overConstrained;
@@ -144,115 +141,20 @@ public final class MatrixSolver {
         Set<MfpKey> free = new LinkedHashSet<>(plan.freeItems());
         free.addAll(plan.rawMaterials());
 
-        try {
-            return solveWith(plan, columns, idle, targets, free, warnings);
-        } catch (UnsolvableSystemException failure) {
-            MfpKey leak = smallestLeak(failure, plan, columns, idle, targets, free);
-            if (leak == null) {
-                throw failure;
-            }
-            // Said plainly, because it changes what the numbers mean: this item no longer has to
-            // balance, so the plan may over-produce or import it. The alternative was the sequential
-            // pass, which cannot close a loop at all and answered a beetroot chain with thirty
-            // thousand centrifuges.
-            warnings.add("these recipes cannot balance " + leak + " exactly, so the plan is allowed "
-                    + "to over-produce or import it - everything else still balances");
-            Set<MfpKey> relaxed = new LinkedHashSet<>(free);
-            relaxed.add(leak);
-            // Not guarded, and it must not be: if freeing that item still leaves a line wanting to
-            // run backwards, this engine has nothing further to offer and the failure belongs to
-            // Solvers, which hands the over-constrained case to simplex. Catching it here would put
-            // the cost-blind relaxation back in charge of a plan it has already failed to describe.
-            return solveWith(plan, columns, idle, targets, relaxed, warnings);
-        }
-    }
-
-    /**
-     * The one item to stop constraining, chosen as the one the plan leaks least of.
-     *
-     * <p>A recipe with several outputs fixes the ratio between them — GregTech's centrifuge turns one
-     * essence into five others in proportions nobody chose — so a plan consuming them in any other
-     * ratio has no exact solution. Requiring every intermediate to net to zero is what makes it
-     * unsolvable, and the surplus it refuses to allow is a heap of spare essence, which is a thing a
-     * real factory simply has.
-     *
-     * <p><b>One item, not all of them.</b> The diagnosis names every constrained item because any of
-     * them <em>could</em> be the one freed; freeing the lot makes the system trivially solvable and
-     * meaningless, since every line may then import whatever it likes. So each is tried alone and the
-     * winner is the one whose freed flow is smallest — the least intervention that makes the plan
-     * describable, and the one a player would pick for the same reason.
-     *
-     * <p>Targets are never candidates: the plan exists to balance them against what was asked for,
-     * and freeing one would let the engine "satisfy" it by importing it.
-     *
-     * @return the item to free, or null when nothing single-handedly resolves it
-     */
-    private MfpKey smallestLeak(UnsolvableSystemException failure, Plan plan, List<Column> columns,
-                                List<IdleLine> idle, Map<MfpKey, Double> targets, Set<MfpKey> free) {
-        if (!failure.isOverConstrained()) {
-            return null;
-        }
-        MfpKey best = null;
-        double smallest = Double.MAX_VALUE;
-        int tried = 0;
-        for (MfpKey candidate : failure.conflicting()) {
-            if (targets.containsKey(candidate) || free.contains(candidate) || tried++ >= RELAX_ATTEMPTS) {
-                continue;
-            }
-            Set<MfpKey> attempt = new LinkedHashSet<>(free);
-            attempt.add(candidate);
-            try {
-                // Copies: solveWith moves disconnected lines from columns to idle, and an attempt
-                // that is about to be thrown away must not take the real lists with it.
-                SolveResult result = solveWith(plan, new ArrayList<>(columns), new ArrayList<>(idle),
-                        targets, attempt, new ArrayList<>());
-                // A relaxation is a leak, not a landfill. Freeing an item says "you may end up with
-                // some spare"; if the answer it produces throws away nearly everything the plan
-                // makes of that item, the item was not leaking - the plan was being propped up by
-                // it, and freeing it has bought a solution by abandoning a whole branch. The pack's
-                // polyvinyl butyral chain reached exactly that: freeing ethylene discards 99.6% of
-                // the ethylene it makes, which scores better than every honest alternative under a
-                // rule that prefers any surplus to any import, and inflates the plan twentyfold.
-                if (isAbandoned(result, candidate)) {
-                    continue;
-                }
-                // Surplus beats import, whatever the magnitudes. Letting a factory keep spare
-                // essence costs a barrel; letting it import an intermediate invents a supply chain
-                // the user never asked for, and would quietly excuse a plan that does not work.
-                double flow = result.byproducts().containsKey(candidate)
-                        ? result.byproducts().get(candidate) - SURPLUS_PREFERENCE
-                        : result.rawInputs().getOrDefault(candidate, 0.0);
-                if (flow < smallest) {
-                    smallest = flow;
-                    best = candidate;
-                }
-            } catch (UnsolvableSystemException ignored) {
-                // Freeing this one is not enough on its own; try the next.
-            }
-        }
-        return best;
-    }
-
-    /**
-     * Whether freeing this item bought a solution by throwing the item away.
-     *
-     * <p>Scale-free on purpose. The flow ranking beside this compares raw magnitudes across
-     * different items, which is not a comparison at all — millibuckets of ethylene against items of
-     * fertiliser — and it is why a vast surplus can beat a small one. A <em>fraction</em> of the
-     * item's own production is the same quantity whatever the item is, and "the plan discards
-     * almost all of what it makes" is the thing being ruled out.
-     */
-    private static boolean isAbandoned(SolveResult result, MfpKey candidate) {
-        Double surplus = result.byproducts().get(candidate);
-        if (surplus == null || surplus <= 0) {
-            return false;
-        }
-        double produced = 0;
-        for (LineResult line : result.lines()) {
-            produced += line.outputs().getOrDefault(candidate, 0.0);
-            produced += line.byproducts().getOrDefault(candidate, 0.0);
-        }
-        return produced > 0 && surplus / produced > ABANDONED_FRACTION;
+        // An over-constrained plan is raised, not patched. This engine used to answer it by freeing
+        // one item at a time and keeping whichever attempt leaked least, which is M12's retirement
+        // (PLAN §13a item 3): the ranking was never a comparison, because raw flow across different
+        // items puts millibuckets of ethylene against items of fertiliser, and on the pack's
+        // polyvinyl butyral chain it chose to discard 99.6% of the plan's own ethylene and inflate
+        // the plan twentyfold (STATUS §14f.1). The guard rails that followed - a negative rate
+        // raised rather than clamped, a candidate refused if it abandoned nine tenths of its own
+        // production - were a holding action for a heuristic that had no business making the choice.
+        //
+        // The condition it existed for belongs to the simplex engine by construction, which allows
+        // over-production rather than forbidding it, and {@code Solvers} routes it there. On the
+        // leaky-loop fixture the two agreed anyway: both free concentrate at 0.25/s and give ore
+        // 0.75/s, reached by a search here and by phase one there.
+        return solveWith(plan, columns, idle, targets, free, warnings);
     }
 
     private SolveResult solveWith(Plan plan, List<Column> columns, List<IdleLine> idle,
@@ -461,8 +363,7 @@ public final class MatrixSolver {
         if (!reduced.isDetermined()) {
             throw new UnsolvableSystemException("the plan does not describe one definite factory",
                     diagnose(reduced, system, columns, lineColumns),
-                    !reduced.inconsistentRows().isEmpty() && reduced.unpinnedColumns().isEmpty(),
-                    reduced.inconsistentRows().isEmpty() ? List.of() : system.eliminated());
+                    !reduced.inconsistentRows().isEmpty() && reduced.unpinnedColumns().isEmpty());
         }
 
         double[] solution = reduced.solution();
@@ -491,11 +392,7 @@ public final class MatrixSolver {
         // exactly zero. The only arithmetic left is to run one of its producers backwards. That is
         // the over-constrained case in disguise — the plan cannot balance exactly — and it already
         // has an owner: the simplex engine, which allows over-production by construction rather than
-        // forbidding it. So this is raised for {@code Solvers} to route, and deliberately raised
-        // with no conflicting items, so the single-item relaxation below does not try to rescue it
-        // first. It cannot: the pack's polyvinyl butyral chain needs both fertiliser and ethanol
-        // freed before its biomass loop is describable, and asked to pick one, the relaxation picks
-        // ethylene and inflates the plan twentyfold (STATUS §14f.1).
+        // forbidding it. So this is raised for {@code Solvers} to route.
         List<String> reversed = new ArrayList<>();
         for (int col = 0; col < lineColumns; col++) {
             if (solution[col] < -ItemFlows.EPSILON) {
@@ -507,8 +404,7 @@ public final class MatrixSolver {
             }
         }
         if (!reversed.isEmpty()) {
-            throw new UnsolvableSystemException("this plan cannot balance exactly",
-                    reversed, true, List.of());
+            throw new UnsolvableSystemException("this plan cannot balance exactly", reversed, true);
         }
         return solution;
     }
@@ -567,28 +463,6 @@ public final class MatrixSolver {
                 .toList();
         return new GaussJordan.Result(solution, unpinned, reduced.inconsistentRows());
     }
-
-    /**
-     * Enough to put any surplus ahead of any import, since a rate has no upper bound worth naming.
-     *
-     * <p>Subtracted rather than compared as a separate key so the ordering stays a single number,
-     * and so two surpluses still sort by size against each other.
-     */
-    private static final double SURPLUS_PREFERENCE = 1e12;
-
-    /**
-     * How much of an item a relaxation may discard before it stops counting as a leak.
-     *
-     * <p>Nine tenths is a judgement, not a measurement, and it is meant to catch only the extreme:
-     * a plan keeping a tenth of what it makes is a factory with spare, and one keeping half a
-     * percent has had a branch switched off to make the arithmetic work. Nothing measured sits near
-     * the line - the case this exists for discards 99.6%, and the honest alternatives on the same
-     * plan discard a few percent at most.
-     */
-    private static final double ABANDONED_FRACTION = 0.9;
-
-    /** How many single-item relaxations to try before giving up and falling back. */
-    private static final int RELAX_ATTEMPTS = 24;
 
     /** Turn "the matrix is singular" into something a user can act on. */
     private static List<String> diagnose(GaussJordan.Result reduced, ItemSystem system,
