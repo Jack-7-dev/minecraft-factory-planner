@@ -15,6 +15,7 @@ import dev.mfp.core.model.MfpRecipe;
 import dev.mfp.core.plan.Line;
 import dev.mfp.core.plan.MachineConfig;
 import dev.mfp.core.plan.Plan;
+import dev.mfp.core.plan.PlanExport;
 import dev.mfp.core.plan.SolverMode;
 import dev.mfp.core.plan.TargetOutput;
 import dev.mfp.core.select.ChooserResult;
@@ -120,6 +121,19 @@ public final class MfpPlanCommand {
                         .executes(ctx -> solver(ctx.getSource(),
                                 StringArgumentType.getString(ctx, "mode")))));
 
+        // The bridge between the GUI and everything headless. A plan that misbehaves is reported as
+        // the string the Export button produces, and until now there was no way to get that string
+        // back into a server: the bug could be described but not run, so every GUI report had to be
+        // reconstructed by hand from its targets and pins - which is exactly the part most likely to
+        // be what was wrong with it.
+        root.then(Commands.literal("import")
+                .then(Commands.argument("plan", StringArgumentType.greedyString())
+                        .executes(ctx -> importPlan(ctx.getSource(),
+                                StringArgumentType.getString(ctx, "plan")))));
+
+        root.then(Commands.literal("export")
+                .executes(ctx -> exportPlan(ctx.getSource())));
+
         root.then(Commands.literal("alternatives")
                 .then(Commands.argument("item", StringArgumentType.greedyString())
                         .executes(ctx -> alternatives(ctx.getSource(),
@@ -193,6 +207,52 @@ public final class MfpPlanCommand {
                 + ", solved in " + dev.mfp.client.ClientPlan.millis((solvedAt - chosenAt) / 1_000),
                 ChatFormatting.DARK_GRAY);
         return solved.lines().size();
+    }
+
+    /**
+     * Read a plan string and run it, exactly as the GUI's Import button would.
+     *
+     * <p>Deliberately the same {@link #choose} every other command ends in: an imported plan is
+     * expanded and solved by the same pipeline as one built here, so a plan that behaves differently
+     * on a server than it did in a client is a real difference rather than an artefact of two import
+     * paths. The unknown-recipe policy is the export format's own — a pin this world does not have is
+     * dropped and named, and the rest of the plan is still worth having.
+     */
+    private static int importPlan(CommandSourceStack source, String text) {
+        RecipeIndex index = MfpIndexHolder.get(source.getServer());
+        PlanExport.Imported imported;
+        try {
+            imported = PlanExport.parse(text, recipeId -> index.recipe(recipeId) != null);
+        } catch (PlanExport.PlanFormatException e) {
+            send(source, "MFP: " + e.getMessage(), ChatFormatting.RED);
+            return 0;
+        } catch (RuntimeException e) {
+            send(source, "MFP: that plan string could not be read: " + e, ChatFormatting.RED);
+            return 0;
+        }
+
+        for (String problem : imported.problems()) {
+            send(source, "  ! " + problem, ChatFormatting.YELLOW);
+        }
+        RawMaterialConfig.reload();
+        return choose(source, index, imported.plan());
+    }
+
+    /**
+     * The current plan as a string, so a headless reproduction can be carried back to a client.
+     *
+     * <p>The other direction of {@code /mfp import}, and worth having for the same reason: a plan
+     * pinned and prodded into shape over half a dozen commands is otherwise trapped in the session
+     * that built it.
+     */
+    private static int exportPlan(CommandSourceStack source) {
+        PlanSession session = PlanSession.of(source.getTextName());
+        if (session == null) {
+            send(source, "MFP: no plan yet - run /mfp plan first", ChatFormatting.RED);
+            return 0;
+        }
+        send(source, PlanExport.export(session.plan()), ChatFormatting.WHITE);
+        return 1;
     }
 
     /** An engine pinned for this session's commands, or null to let the plan decide. */
