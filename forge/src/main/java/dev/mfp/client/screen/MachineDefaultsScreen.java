@@ -223,10 +223,18 @@ public final class MachineDefaultsScreen extends ModalScreen {
             int next = defaults.hasTier() ? defaults.tier() + 1 : 0;
             apply(machine, next > GtTiers.MAX ? defaults.withoutTier() : defaults.withTier(next));
         });
+        tier.secondary(() -> {
+            if (!machine.multiblock()) {
+                return;
+            }
+            int previous = defaults.hasTier() ? defaults.tier() - 1 : GtTiers.MAX;
+            apply(machine, previous < 0 ? defaults.withoutTier() : defaults.withTier(previous));
+        });
         tier.enabled(machine.multiblock());
         tier.tooltip(machine.multiblock()
                 ? "The energy hatch you actually built into this machine. It beats the general "
-                        + "\"build at tier\" default, and a recipe that needs more still gets more."
+                        + "\"build at tier\" default, and a recipe that needs more still gets more. "
+                        + "Right-click to go back."
                 : "A single block's tier is the block you place, so there is nothing to describe.");
         tier.bounds(x + labelWidth, cursorY, Math.max(80, Math.min(boxWidth, tier.preferredWidth())), 14);
         widgets.add(tier);
@@ -283,7 +291,14 @@ public final class MachineDefaultsScreen extends ModalScreen {
                         ? defaults.withoutOption(spec.key())
                         : defaults.withOption(spec.key(), choices.get(next)));
             });
-            cycle.tooltip(spec.description());
+            cycle.secondary(() -> {
+                int at = choices.indexOf(String.valueOf(current));
+                int previous = at < 0 ? choices.size() - 1 : at - 1;
+                apply(machine, previous < 0
+                        ? defaults.withoutOption(spec.key())
+                        : defaults.withOption(spec.key(), choices.get(previous)));
+            });
+            cycle.tooltip(spec.description() + " Right-click to go back.");
             cycle.bounds(x + labelWidth, y, Math.max(70, Math.min(boxWidth, cycle.preferredWidth())), 14);
             widgets.add(cycle);
         } else {

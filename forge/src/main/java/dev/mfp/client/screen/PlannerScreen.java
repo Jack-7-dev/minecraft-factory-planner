@@ -214,8 +214,12 @@ public final class PlannerScreen extends Screen {
             timescale = timescale.next();
             rebuild();
         });
+        scaleToggle.secondary(() -> {
+            timescale = timescale.previous();
+            rebuild();
+        });
         scaleToggle.tooltip("Per second, per minute or stacks per minute. A display multiplication "
-                + "only - everything MFP stores is per second.");
+                + "only - everything MFP stores is per second. Right-click to go back.");
         scaleToggle.bounds(refresh.x() + refresh.width() + GAP, cursorY, scaleToggle.preferredWidth(), 14);
         widgets.add(scaleToggle);
 
@@ -236,6 +240,10 @@ public final class PlannerScreen extends Screen {
             // From what the button says, not from what the plan holds: a derived MATRIX reads as
             // "Auto", and advancing from MATRIX would make the first press appear to do nothing.
             plan.plan().solverMode(nextMode(displayedMode()));
+            resolve();
+        });
+        engine.secondary(() -> {
+            plan.plan().solverMode(previousMode(displayedMode()));
             resolve();
         });
         engine.tooltip(engineTooltip());
@@ -352,6 +360,11 @@ public final class PlannerScreen extends Screen {
     private static SolverMode nextMode(SolverMode mode) {
         SolverMode[] modes = SolverMode.values();
         return modes[(mode.ordinal() + 1) % modes.length];
+    }
+
+    private static SolverMode previousMode(SolverMode mode) {
+        SolverMode[] modes = SolverMode.values();
+        return modes[(mode.ordinal() + modes.length - 1) % modes.length];
     }
 
     private static String name(SolverMode mode) {
@@ -686,21 +699,27 @@ public final class PlannerScreen extends Screen {
             rate.bounds(cursorX + SlotWidget.ICON + 2, cursorY + 1, 46, 14);
             widgets.add(rate);
 
-            TextButton unit = new TextButton(unitLabel(target.key()), () -> {
+            // Two states, so stepping back is the same step. Wired anyway, so that right-click
+            // means "the other one" everywhere in the planner rather than only on the long rings.
+            Runnable flipUnit = () -> {
                 cycleUnit(target.key());
                 rebuild();
-            });
+            };
+            TextButton unit = new TextButton(unitLabel(target.key()), flipUnit);
+            unit.secondary(flipUnit);
             unit.centred();
             unit.tooltip(unitTooltip(target.key()));
             unit.enabled(perUnit > 0 && KeyStacks.unitsPerStack(target.key()) > 0);
             unit.bounds(rate.x() + rate.width() + 2, cursorY + 1, 22, 14);
             widgets.add(unit);
 
-            TextButton per = new TextButton(targetTimescale.suffix(), () -> {
+            Runnable flipPer = () -> {
                 targetTimescale = targetTimescale == Timescale.PER_SECOND
                         ? Timescale.PER_MINUTE : Timescale.PER_SECOND;
                 rebuild();
-            });
+            };
+            TextButton per = new TextButton(targetTimescale.suffix(), flipPer);
+            per.secondary(flipPer);
             per.centred();
             per.tooltip("Per second or per minute. A display conversion only, like the unit beside "
                     + "it: the plan is stored per second whichever this says, and nothing is "

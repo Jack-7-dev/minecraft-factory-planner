@@ -251,11 +251,15 @@ public final class MachineConfigScreen extends ModalScreen {
         limit.bounds(x + labelWidth, cursorY, Math.min(60, boxWidth), 14);
         widgets.add(limit);
 
-        TextButton force = new TextButton(config.forceLimit() ? "exactly" : "at most", () -> {
+        // Two states, so its own inverse — wired to both buttons only so that a right-click here does
+        // not read as a dead button beside the cycling ones below it.
+        Runnable flipForce = () -> {
             if (config.hasLimit()) {
                 apply(config.withLimit(config.limit(), !config.forceLimit()));
             }
-        });
+        };
+        TextButton force = new TextButton(config.forceLimit() ? "exactly" : "at most", flipForce);
+        force.secondary(flipForce);
         force.enabled(config.hasLimit());
         force.tooltip("\"at most\" caps the line; \"exactly\" builds that many whether or not demand "
                 + "needs them.");
@@ -288,7 +292,17 @@ public final class MachineConfigScreen extends ModalScreen {
                         ? config.withoutOption(spec.key())
                         : config.withOption(spec.key(), choices.get(next)));
             });
-            cycle.tooltip(spec.description());
+            cycle.secondary(() -> {
+                // The ring the forward step walks, walked the other way: "not set" sits between the
+                // last choice and the first, so a value not in the list — a coil a pack update
+                // renamed — lands on the last exactly as it lands on the first going forwards.
+                int at = choices.indexOf(String.valueOf(current));
+                int previous = at < 0 ? choices.size() - 1 : at - 1;
+                apply(previous < 0
+                        ? config.withoutOption(spec.key())
+                        : config.withOption(spec.key(), choices.get(previous)));
+            });
+            cycle.tooltip(spec.description() + " Right-click to go back.");
             cycle.bounds(x + labelWidth, y, Math.max(70, Math.min(boxWidth, cycle.preferredWidth())), 14);
             widgets.add(cycle);
         } else {

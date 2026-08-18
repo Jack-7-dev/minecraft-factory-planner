@@ -56,4 +56,10 @@ public enum Timescale {
         Timescale[] values = values();
         return values[(ordinal() + 1) % values.length];
     }
+
+    /** The other way round the same ring, for the right-click that undoes an overshoot. */
+    public Timescale previous() {
+        Timescale[] values = values();
+        return values[(ordinal() + values.length - 1) % values.length];
+    }
 }

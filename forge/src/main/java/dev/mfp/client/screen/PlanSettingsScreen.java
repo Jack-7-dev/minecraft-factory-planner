@@ -99,8 +99,14 @@ public final class PlanSettingsScreen extends ModalScreen {
             ClientPlanner.refresh();
             rebuild();
         });
+        engine.secondary(() -> {
+            plan.solverMode(previousMode(plan.solverMode()));
+            ClientPlanner.refresh();
+            rebuild();
+        });
         engine.tooltip("AUTO lets the chooser decide: the matrix engine when it observes a loop, the "
-                + "sequential one otherwise. Choosing explicitly sticks until you change it.");
+                + "sequential one otherwise. Choosing explicitly sticks until you change it. "
+                + "Right-click to go back.");
         engine.bounds(contentX() + labelWidth, cursorY, engine.preferredWidth(), 14);
         widgets.add(engine);
         cursorY += 14 + GAP;
@@ -110,12 +116,19 @@ public final class PlanSettingsScreen extends ModalScreen {
         // at - the LV steel line that gets them to MV is the ordinary case.
         TextButton tier = new TextButton(tierLabel(), () -> {
             int next = plan.defaultTier() == Preferences.NO_DEFAULT_TIER ? 0 : plan.defaultTier() + 1;
-            plan.defaultTier(next > 14 ? Preferences.NO_DEFAULT_TIER : next);
+            plan.defaultTier(next > GtTiers.MAX ? Preferences.NO_DEFAULT_TIER : next);
+            ClientPlanner.refresh();
+            rebuild();
+        });
+        tier.secondary(() -> {
+            int previous = plan.defaultTier() == Preferences.NO_DEFAULT_TIER
+                    ? GtTiers.MAX : plan.defaultTier() - 1;
+            plan.defaultTier(previous < 0 ? Preferences.NO_DEFAULT_TIER : previous);
             ClientPlanner.refresh();
             rebuild();
         });
         tier.tooltip("The tier this plan builds at. Unset follows your standing default, and a "
-                + "machine you chose yourself is never moved either way.");
+                + "machine you chose yourself is never moved either way. Right-click to go back.");
         tier.bounds(contentX() + labelWidth, cursorY, Math.max(110, tier.preferredWidth()), 14);
         widgets.add(tier);
         cursorY += 14 + GAP;
@@ -299,6 +312,11 @@ public final class PlanSettingsScreen extends ModalScreen {
     private static SolverMode nextMode(SolverMode mode) {
         SolverMode[] modes = SolverMode.values();
         return modes[(mode.ordinal() + 1) % modes.length];
+    }
+
+    private static SolverMode previousMode(SolverMode mode) {
+        SolverMode[] modes = SolverMode.values();
+        return modes[(mode.ordinal() + modes.length - 1) % modes.length];
     }
 
     /** Items the last solve's own diagnosis named as candidates for freeing. */

@@ -84,12 +84,18 @@ public final class DefaultsScreen extends ModalScreen {
             // free-text field would invite "HV" to be typed where an integer was wanted.
             int next = preferences.defaultTier() == Preferences.NO_DEFAULT_TIER
                     ? 0 : preferences.defaultTier() + 1;
-            preferences.defaultTier(next > 14 ? Preferences.NO_DEFAULT_TIER : next);
+            preferences.defaultTier(next > GtTiers.MAX ? Preferences.NO_DEFAULT_TIER : next);
+            saveAndResolve();
+        });
+        tier.secondary(() -> {
+            int previous = preferences.defaultTier() == Preferences.NO_DEFAULT_TIER
+                    ? GtTiers.MAX : preferences.defaultTier() - 1;
+            preferences.defaultTier(previous < 0 ? Preferences.NO_DEFAULT_TIER : previous);
             saveAndResolve();
         });
         tier.tooltip("The tier you build at. Every default machine becomes that member of its family "
                 + "- a recipe that cannot run there still gets the lowest machine that can, and a "
-                + "machine you chose yourself is never moved.");
+                + "machine you chose yourself is never moved. Right-click to go back.");
         tier.bounds(contentX() + 110, cursorY, Math.max(90, tier.preferredWidth()), 14);
         widgets.add(tier);
 

@@ -14,6 +14,7 @@ public final class TextButton extends MfpWidget {
     private static final int ICON = 16;
 
     private final Runnable action;
+    private Runnable secondary;
     private String label;
     private String tooltip;
     private boolean enabled = true;
@@ -64,6 +65,25 @@ public final class TextButton extends MfpWidget {
         return this;
     }
 
+    /**
+     * What a right-click does, which on every cycling button in MFP is "step the other way".
+     *
+     * <p>A button that cycles a list is only pleasant while the list is short. Eight coils overshot
+     * by one costs seven more left-clicks to come back to, and the tier ring is fifteen long — so the
+     * gesture that fixes an overshoot has to be cheaper than the one that caused it. Right-click is
+     * that gesture, and it is the one a player already expects from every other cycling control they
+     * have used. Callers are responsible for making it the exact inverse of the forward step, wrap
+     * and "not set" state included; a backward step that is not an inverse is worse than none.
+     *
+     * <p>Optional on purpose. A button with no secondary leaves a right-click unhandled and falling
+     * through, which is what keeps a right-click over an ordinary button inert rather than turning
+     * every button in the GUI into a second, undiscoverable action.
+     */
+    public TextButton secondary(Runnable action) {
+        this.secondary = action;
+        return this;
+    }
+
     public TextButton enabled(boolean value) {
         this.enabled = value;
         return this;
@@ -94,12 +114,16 @@ public final class TextButton extends MfpWidget {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        if (!enabled || button != 0 || !isMouseOver(mouseX, mouseY)) {
+        if (!enabled || !isMouseOver(mouseX, mouseY)) {
+            return false;
+        }
+        Runnable pressed = button == 0 ? action : button == 1 ? secondary : null;
+        if (pressed == null) {
             return false;
         }
         Minecraft.getInstance().getSoundManager()
                 .play(SimpleSoundInstance.forUI(SoundEvents.UI_BUTTON_CLICK, 1.0F));
-        action.run();
+        pressed.run();
         return true;
     }
 
