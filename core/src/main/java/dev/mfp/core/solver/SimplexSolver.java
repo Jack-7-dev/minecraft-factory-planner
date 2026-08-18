@@ -137,11 +137,105 @@ public final class SimplexSolver {
                 }
             }
             simplex.retire(programme.artificials());
-            simplex.minimise(programme.phaseTwoCost());
-            return assemble(plan, programme, simplex.solution(), columns, idle, targets,
+            double[] cost = programme.phaseTwoCost();
+            simplex.minimise(cost);
+            double[] values = simplex.solution();
+            List<String> undecided = undecidedLines(simplex, cost, columns, values);
+            if (!undecided.isEmpty()) {
+                throw new AmbiguousPlanException(undecided);
+            }
+            return assemble(plan, programme, values, columns, idle, targets,
                     classification, warnings);
         }
         throw new IllegalStateException("the plan could not be relaxed into a solvable one");
+    }
+
+    // --------------------------------------------------------------- ambiguity
+
+    /**
+     * Raised when the programme has more than one answer and nothing in it says which.
+     *
+     * <p>The simplex will always hand something back, and that is precisely the danger: two
+     * interchangeable recipes make every split between them equally good, so the answer that comes
+     * out is an accident of the pivot order rather than a decision the plan contains. Presenting it
+     * would be inventing a choice the user never made (plan P6), which is the one thing the matrix
+     * engine did better than this one — and the single reason it stayed the default engine (STATUS
+     * §10.9).
+     *
+     * <p>Named lines, not a count: the lines whose rate nothing decides are the ones the user has to
+     * do something about, and dropping one or pinning its rate is the fix.
+     */
+    public static final class AmbiguousPlanException extends RuntimeException {
+
+        private final List<String> undecided;
+
+        AmbiguousPlanException(List<String> undecided) {
+            super("the plan does not describe one definite factory: " + diagnostic(undecided));
+            this.undecided = List.copyOf(undecided);
+        }
+
+        /** The recipe ids whose rate the plan does not determine. */
+        public List<String> undecidedLines() {
+            return undecided;
+        }
+
+        /** What to tell the user, worded as {@code MatrixSolver} words the same finding. */
+        public List<String> diagnostics() {
+            return List.of(diagnostic(undecided));
+        }
+
+        private static String diagnostic(List<String> undecided) {
+            return "nothing decides how fast these lines run, because another line in the plan "
+                    + "makes the same thing - drop one or pin its rate: " + undecided;
+        }
+    }
+
+    /**
+     * The lines this answer does not actually decide the rate of.
+     *
+     * <p>A tied column is a column the programme would let in for free; a tied column that
+     * <em>changes the machine counts</em> is a second, equally good factory. The difference between
+     * the two is the whole check, and it is why this asks for the other answer rather than stopping
+     * at the reduced cost: the simplex is degenerate constantly — every line at zero is a degenerate
+     * vertex — and a degenerate pivot re-describes one answer rather than finding another.
+     *
+     * <p>Only line columns are asked about. An import or surplus column tied against another is the
+     * same factory with its shopping list written differently, and the amounts are pinned by the
+     * item rows in any case; it is the machine counts that a user would build differently.
+     *
+     * <p><b>The tie-breaks are left in the cost.</b> Two recipes making the same thing at different
+     * batch sizes are separated by {@link #ACTIVITY} and so are <em>not</em> reported here, where the
+     * matrix engine's rank test would report them. That is deliberate: this errs towards answering,
+     * and a false report of ambiguity costs the user their answer for a plan that has one.
+     */
+    private static List<String> undecidedLines(Simplex simplex, double[] cost,
+                                               List<Column> columns, double[] values) {
+        List<String> undecided = new ArrayList<>();
+        for (int column : simplex.tiedColumns(cost)) {
+            if (column >= columns.size()) {
+                continue;
+            }
+            double[] other = simplex.answerWith(column);
+            if (other == null || sameRates(values, other, columns.size())) {
+                continue;
+            }
+            String id = columns.get(column).line().recipe().id();
+            if (!undecided.contains(id)) {
+                undecided.add(id);
+            }
+        }
+        return undecided;
+    }
+
+    /** Whether two answers describe the same factory, compared relative to the rates themselves. */
+    private static boolean sameRates(double[] one, double[] other, int lineCount) {
+        for (int j = 0; j < lineCount; j++) {
+            double scale = Math.max(1.0, Math.max(Math.abs(one[j]), Math.abs(other[j])));
+            if (Math.abs(one[j] - other[j]) > ItemFlows.EPSILON * scale) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // ------------------------------------------------------------ classification

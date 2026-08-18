@@ -36,11 +36,12 @@ import java.util.List;
  *       that once fell back to 29,867 centrifuges needed (STATUS §6d.22).</li>
  * </ul>
  *
- * <p>The case that is <b>not</b> handed to it is ambiguity — two interchangeable recipes with
- * nothing to choose between them. The simplex engine would answer that happily, by picking one, and
- * picking one is inventing a decision the user has not made (plan P6). So an ambiguous plan still
- * falls back to the sequential pass carrying the matrix engine's diagnosis, which names the lines to
- * do something about.
+ * <p><b>Ambiguity used to be the case that could not be handed to it</b>, because the simplex would
+ * answer it happily by picking one of two interchangeable recipes, and picking one is inventing a
+ * decision the user has not made (plan P6). It now notices instead — a tied column that changes the
+ * machine counts is a second, equally good factory — and raises
+ * {@link SimplexSolver.AmbiguousPlanException} naming the lines whose rate nothing decides. Either
+ * engine reaching that conclusion falls back to the sequential pass carrying the same diagnosis.
  */
 public final class Solvers {
 
@@ -235,6 +236,13 @@ public final class Solvers {
                                          MatrixSolver.UnsolvableSystemException matrixFailure) {
         try {
             return new SimplexSolver(resolver).solve(plan);
+        } catch (SimplexSolver.AmbiguousPlanException ambiguous) {
+            // Not a failure of the engine: the engine is refusing to pick, which is the point of it
+            // having learned to notice. Worded as the matrix engine words the same finding, since
+            // the fix — drop one of the lines or pin its rate — is the same one.
+            return fallback(plan, resolver, ambiguous.diagnostics(),
+                    "this plan has more than one answer and nothing in it says which, so these "
+                            + "numbers come from the sequential pass");
         } catch (RuntimeException failure) {
             List<String> diagnostics = new ArrayList<>();
             if (matrixFailure != null) {

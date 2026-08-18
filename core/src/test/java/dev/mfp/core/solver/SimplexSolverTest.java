@@ -10,6 +10,8 @@ import dev.mfp.core.plan.Plan;
 import dev.mfp.core.plan.SolverMode;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static dev.mfp.core.solver.Fixtures.CASING;
 import static dev.mfp.core.solver.Fixtures.ORE;
 import static dev.mfp.core.solver.Fixtures.PLATE;
@@ -17,6 +19,7 @@ import static dev.mfp.core.solver.Fixtures.STONE_DUST;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -290,6 +293,73 @@ class SimplexSolverTest {
         assertEquals(2.0, result.rawInputs().get(PLATE), TOLERANCE);
     }
 
+    // ---------------------------------------------------------------- ambiguity
+
+    /**
+     * Two ways to make the same thing, with nothing to choose between them, has no single answer —
+     * and this engine now says so rather than picking one.
+     *
+     * <p>The gate on making simplex the default engine (PLAN §13a, M12 item 1). Every split between
+     * the two recipes balances equally well and costs exactly the same, so the answer the simplex
+     * hands back is an accident of its pivot order; presenting it would be inventing a decision the
+     * user never made (plan P6). This is the one thing the matrix engine did better, and the whole
+     * reason it stayed the default (STATUS §10.9).
+     *
+     * <p>The same line is named as {@code MatrixSolverTest} names — the one left without a pivot,
+     * which is one fewer than the set of interchangeable recipes, because the first of them is the
+     * one the answer is written in terms of.
+     */
+    @Test
+    void interchangeableRecipesAreReportedRatherThanPicked() {
+        SimplexSolver.AmbiguousPlanException failure = assertThrows(
+                SimplexSolver.AmbiguousPlanException.class, () -> solver.solve(twoWaysToMakeDust()));
+
+        assertEquals(List.of("mfp:dust_b"), failure.undecidedLines());
+        assertTrue(failure.getMessage().contains("drop one or pin its rate"),
+                "and must say what to do about it, got: " + failure.getMessage());
+    }
+
+    /** The matrix engine's verdict on the same plan, so the two are known to agree. */
+    @Test
+    void bothWholePlanEnginesNameTheSameUndecidedLine() {
+        MatrixSolver.UnsolvableSystemException matrix = assertThrows(
+                MatrixSolver.UnsolvableSystemException.class,
+                () -> new MatrixSolver().solve(twoWaysToMakeDust()));
+        SimplexSolver.AmbiguousPlanException simplex = assertThrows(
+                SimplexSolver.AmbiguousPlanException.class,
+                () -> solver.solve(twoWaysToMakeDust()));
+
+        assertTrue(matrix.getMessage().contains("mfp:dust_b"), matrix.getMessage());
+        assertTrue(simplex.getMessage().contains("mfp:dust_b"), simplex.getMessage());
+    }
+
+    /**
+     * A plan that <em>does</em> have one answer is not reported as ambiguous, and that is the half of
+     * this check that can quietly ruin every plan MFP solves.
+     *
+     * <p>A false report costs the user their answer, so the cases that look tied and are not get
+     * asserted explicitly: an acyclic chain where every rate is forced, and a loop, whose spin rate
+     * is decided by nothing but the cost of running and would be a free column without it.
+     */
+    @Test
+    void aPlanWithOneAnswerIsNotCalledAmbiguous() {
+        assertTrue(solver.solve(fiveStepChain()).isComplete());
+        assertEquals(SolverMode.SIMPLEX, solver.solve(acidLoopPlan()).engine());
+    }
+
+    /** An ambiguous plan falls back to the sequential pass carrying the diagnosis, either way in. */
+    @Test
+    void solversFallsBackWhenSimplexFindsThePlanAmbiguous() {
+        SolveResult result = Solvers.solve(twoWaysToMakeDust().solverMode(SolverMode.SIMPLEX));
+
+        assertEquals(SolverMode.SEQUENTIAL, result.engine(),
+                "an ambiguous plan must fall back rather than show a guess");
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("more than one answer")),
+                "and must say why: " + result.warnings());
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("mfp:dust_b")),
+                "naming the line to do something about: " + result.warnings());
+    }
+
     // ---------------------------------------------------------------- dispatch
 
     /**
@@ -370,6 +440,14 @@ class SimplexSolverTest {
         Plan plan = new Plan("leaky loop").target(Loop.METAL, 1.0);
         plan.add(new Line(leach));
         plan.add(new Line(refine));
+        return plan;
+    }
+
+    /** Two recipes with identical inputs, outputs and durations: the ambiguous plan. */
+    private static Plan twoWaysToMakeDust() {
+        Plan plan = new Plan("ambiguous").target(Fixtures.DUST, 1.0);
+        plan.add(new Line(Fixtures.simple("mfp:dust_a", Fixtures.CRUSHED, 1, Fixtures.DUST, 1, 20, 8)));
+        plan.add(new Line(Fixtures.simple("mfp:dust_b", Fixtures.CRUSHED, 1, Fixtures.DUST, 1, 20, 8)));
         return plan;
     }
 

@@ -131,6 +131,75 @@ final class Simplex {
         }
     }
 
+    /**
+     * A copy at the same basis, so an alternative optimum can be probed without losing this one.
+     *
+     * <p>The tableau is tens of rows by tens of columns, so copying it is cheaper than the pivot it
+     * exists to undo, and it means the probe cannot leave the real answer half-pivoted.
+     */
+    private Simplex(Simplex source) {
+        this.rows = source.rows;
+        this.columns = source.columns;
+        this.tableau = new double[rows][];
+        for (int row = 0; row < rows; row++) {
+            this.tableau[row] = source.tableau[row].clone();
+        }
+        this.basis = source.basis.clone();
+        this.blocked = source.blocked.clone();
+        this.iterations = source.iterations;
+    }
+
+    /**
+     * Non-basic columns that could enter the basis without making the objective any worse.
+     *
+     * <p>A zero reduced cost at the optimum is the textbook signature of an <b>alternative
+     * optimum</b>: this answer is one of several the programme rates equally, and which one came
+     * back is an accident of the pivot order. That is what {@link SimplexSolver} needs to tell an
+     * answer from a guess (plan P6) — the simplex will always hand back <em>an</em> answer, and the
+     * question is whether the programme actually decided it.
+     *
+     * <p>Zero cost is necessary and not sufficient: the column may only be able to enter at a step
+     * of zero, in which case the answer does not move at all. Deciding that is
+     * {@link #answerWith(int)}'s job, because it is the answer that settles it rather than the
+     * arithmetic.
+     */
+    int[] tiedColumns(double[] cost) {
+        double[] reduced = reducedCosts(cost);
+        boolean[] basic = new boolean[columns];
+        for (int row = 0; row < rows; row++) {
+            basic[basis[row]] = true;
+        }
+        int[] tied = new int[columns];
+        int found = 0;
+        for (int column = 0; column < columns; column++) {
+            if (basic[column] || blocked[column]) {
+                continue;
+            }
+            if (Math.abs(reduced[column]) <= TOLERANCE) {
+                tied[found++] = column;
+            }
+        }
+        return Arrays.copyOf(tied, found);
+    }
+
+    /**
+     * The answer reached by forcing {@code column} into the basis, or null if nothing can leave.
+     *
+     * <p>Only ever called on a column {@link #tiedColumns} named, so the result is another optimum
+     * rather than a worse plan. It may also be the <em>same</em> optimum described by a different
+     * basis — a degenerate pivot moves the basis and no number in it — which is exactly why the
+     * caller compares the two answers rather than trusting the tie.
+     */
+    double[] answerWith(int column) {
+        Simplex probe = new Simplex(this);
+        int leaving = probe.ratioTest(column);
+        if (leaving < 0) {
+            return null;
+        }
+        probe.pivot(leaving, column);
+        return probe.solution();
+    }
+
     /** The value of every variable, non-basic ones being zero. */
     double[] solution() {
         double[] values = new double[columns];
