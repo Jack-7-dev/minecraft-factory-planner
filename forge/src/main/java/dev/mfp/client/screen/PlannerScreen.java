@@ -740,17 +740,27 @@ public final class PlannerScreen extends Screen {
 
     // ------------------------------------------------------------------ table
 
+    /**
+     * The columns, in the order a line is read.
+     *
+     * <p><b>Products first</b>, because that is what a line is: "the line that makes ethanol", not
+     * "the line with a distillation tower in it". A player scanning the table is looking for a
+     * product and finding the machine that makes it, and having to read past four columns of
+     * machinery to reach the name of the thing was the table asking the question backwards. The
+     * grip keeps the left edge — it is a handle for dragging the row, not a field of it, and a
+     * handle that is not against the edge is one nobody grabs.
+     */
     private static final List<Table.Column> COLUMNS = List.of(
             new Table.Column("", 0.45f,
                     "Move a line up or down. Display order only - the solver's own order is "
                             + "topological and is not changed by this."),
+            new Table.Column("Products", 2.6f,
+                    "What this line delivers. Hover it for the recipe behind it, and click it to "
+                            + "see every other way of making the same thing."),
             new Table.Column("Machine", 2.4f, "Click to choose the machine, its tier and what is built into it."),
             new Table.Column("Tier", 0.6f, "Click to configure the machine."),
             new Table.Column("Machines", 1.0f, "Fractional need, with the number to build in brackets."),
             new Table.Column("EU/t", 0.9f, "Drawn (-) and produced (+) by the whole line."),
-            new Table.Column("Products", 2.6f,
-                    "What this line delivers. Hover it for the recipe behind it, and click it to "
-                            + "see every other way of making the same thing."),
             new Table.Column("Byproducts", 1.8f,
                     "Surplus this line makes. Empty under the matrix engine, which balances the "
                             + "plan as a whole - see the Byproducts tab."),
@@ -793,10 +803,6 @@ public final class PlannerScreen extends Screen {
                                     Component.literal("Display order only: the solver walks the plan "
                                             + "in its own order and this does not change any number.")
                                             .withStyle(ChatFormatting.GRAY))),
-                    machineCell,
-                    Cells.clickable(tierCell(result, recipe, config), () -> openMachineConfig(line)),
-                    machineCountCell(result, throughput),
-                    energyCell(result),
                     // The recipe used to have a column of its own, showing its id. Almost nothing a
                     // user decides depends on that string, and it cost the width the flows wanted, so
                     // it moved here: the products are how a line is recognised anyway, and the recipe
@@ -805,6 +811,10 @@ public final class PlannerScreen extends Screen {
                             Cells.orTooltip(Cells.flows(slotsFor(result.outputs(), divisor)),
                                     recipeTooltip(line, throughput, producedFor(recipe, result))),
                             () -> openRecipePicker(recipe, result)),
+                    machineCell,
+                    Cells.clickable(tierCell(result, recipe, config), () -> openMachineConfig(line)),
+                    machineCountCell(result, throughput),
+                    energyCell(result),
                     byproductCell(result, divisor),
                     // The one column whose flows lead somewhere: an ingredient is a question about
                     // where it comes from, and clicking it is how the chain is built out (M11.2).
