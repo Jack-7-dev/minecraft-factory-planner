@@ -100,7 +100,7 @@ public final class Solvers {
         int dropped = plan.removeLines(dead);
         SolveResult pruned = solveOnce(plan, resolver);
         List<MfpKey> appeared = newImports(pruned, result);
-        List<MfpKey> bought = alsoMadeByTheRemovedLines(dead, pruned);
+        List<MfpKey> bought = alsoMadeByTheRemovedLines(dead, pruned, plan);
         if (dropped > 0 && appeared.isEmpty() && bought.isEmpty()) {
             return withNote(pruned, dropped);
         }
@@ -149,13 +149,26 @@ public final class Solvers {
      * producer at all — the warning explaining why they were bought did not survive either. A plan
      * that quietly says "butyraldehyde is a raw material" is exactly the confidently wrong answer
      * this project's first principle is about.
+     *
+     * <p><b>Raw materials do not count</b>, and leaving them out is what keeps this from being a
+     * rule against dead lines in general. The user has already said water comes from a hole in the
+     * ground, so a distillation tower that drops water as a byproduct is not the plan's way of
+     * obtaining it and buying it is not a decision anyone needs told about. The reported plan of
+     * §14f is exactly that shape — its idle biomass tower makes water among its distillates — and
+     * without this clause its row would stay at zero forever for a reason that has nothing to do
+     * with it.
      */
-    private static List<MfpKey> alsoMadeByTheRemovedLines(List<Line> removed, SolveResult pruned) {
+    private static List<MfpKey> alsoMadeByTheRemovedLines(List<Line> removed, SolveResult pruned,
+                                                          Plan plan) {
         List<MfpKey> bought = new ArrayList<>();
         for (Line line : removed) {
             for (MfpOutput output : line.recipe().outputs()) {
-                if (pruned.rawInputs().containsKey(output.key()) && !bought.contains(output.key())) {
-                    bought.add(output.key());
+                MfpKey key = output.key();
+                if (plan.rawMaterials().contains(key) || plan.freeItems().contains(key)) {
+                    continue;
+                }
+                if (pruned.rawInputs().containsKey(key) && !bought.contains(key)) {
+                    bought.add(key);
                 }
             }
         }

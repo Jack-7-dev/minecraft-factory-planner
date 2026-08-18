@@ -5,6 +5,10 @@
 !README.md
 !LICENSE.md
 
+# Exported plan strings kept for reproduction. Same reasoning as the notes above, and one more: a
+# plan string is a snapshot of somebody's game, and it is not this repository's to publish.
+docs/plans/
+
 # Gradle
 .gradle/
 build/

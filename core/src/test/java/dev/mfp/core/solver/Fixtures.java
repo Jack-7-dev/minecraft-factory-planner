@@ -34,6 +34,9 @@ final class Fixtures {
     static final MfpKey STONE_DUST = MfpKey.item("mfp", "stone_dust");
     static final MfpKey GRAVEL = MfpKey.item("mfp", "gravel");
     static final MfpKey FUEL = MfpKey.item("mfp", "fuel");
+    /** A pair of solvents that only make each other, so neither can be made at all. */
+    static final MfpKey SOLVENT_A = MfpKey.fluid("mfp", "solvent_a");
+    static final MfpKey SOLVENT_B = MfpKey.fluid("mfp", "solvent_b");
     static final MfpKey LUBRICANT = MfpKey.fluid("mfp", "lubricant");
 
     private Fixtures() {}

@@ -1,5 +1,8 @@
 package dev.mfp.core.solver;
 
+import dev.mfp.core.model.MfpIngredient;
+import dev.mfp.core.model.MfpOutput;
+import dev.mfp.core.model.MfpRecipe;
 import dev.mfp.core.plan.Line;
 import dev.mfp.core.plan.Plan;
 import dev.mfp.core.plan.SolverMode;
@@ -97,34 +100,80 @@ class SolversPruneTest {
     }
 
     /**
-     * A line is not dead because the answer decided to buy what it makes.
+     * A line is not dead because the answer gave up on making what it makes.
      *
-     * <p>Declaring the plate raw makes buying one cheaper than making it from two raw ingots, so the
-     * plate line solves to zero — and its product is on the shopping list. Deleting it would leave a
-     * plan that says "plates are bought" with nothing left to say the plan had a way to make them,
-     * and the user's own reason for it (they declared the plate raw) invisible.
+     * <p>Packing nine small into one big and unpacking it again is a cycle with no way in: each item
+     * is produced and consumed inside the plan and nothing outside supplies either, so the engine
+     * cannot balance them, relaxes one into an import, and both lines go to zero behind it. Deleting
+     * them leaves a plan that buys the big item with nothing left to say the plan had a way to make
+     * it — and, because the pruned plan re-solves from scratch and nothing in it produces that item
+     * at all, without even the warning that explained why.
      *
-     * <p>The pack case behind it: the polyvinyl butyral chain expands to 42 lines, the engine relaxes
-     * butyraldehyde into an import, 39 lines go idle behind it, and pruning them turned a whole
-     * chemistry tree into a three-line plan buying its own intermediates. The re-solve also loses the
-     * warning that explained why, because in the pruned plan nothing produces those items at all.
+     * <p>Straight from the pack: the polyvinyl butyral chain expands to 42 lines around two of these
+     * (a 3x3 dust assemble and its disassemble), the engine relaxes butyraldehyde and vinyl acetate,
+     * 39 lines go idle, and pruning them returned a three-line plan buying two intermediates it had a
+     * whole chemistry tree for.
      */
     @Test
-    @DisplayName("a line whose product the answer buys is kept, not pruned")
+    @DisplayName("a line whose product the answer gave up making is kept, not pruned")
     void aLineWhoseProductIsBoughtIsNotDead() {
-        Plan plan = new Plan("bought").target(CASING, 1.0).solverMode(SolverMode.SIMPLEX);
-        plan.add(new Line(Fixtures.casing()));
-        plan.add(new Line(Fixtures.plate()));
-        plan.rawMaterial(Fixtures.PLATE);
-        plan.rawMaterial(Fixtures.INGOT);
+        Plan plan = solventLoopPlan();
 
         SolveResult result = Solvers.solve(plan);
 
-        assertEquals(2, result.lines().size(), "the line stays: " + result.warnings());
-        assertEquals(2, plan.allLines().size());
-        assertTrue(result.lines().get(1).isIdle(), "and it is visibly doing nothing");
-        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("mfp:plate")),
-                "and the plan says which ingredient it would have to buy: " + result.warnings());
+        assertEquals(4, result.lines().size(), "the lines stay: " + result.warnings());
+        assertEquals(4, plan.allLines().size());
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("solvent_b")),
+                "and the plan names what it would have to buy: " + result.warnings());
+    }
+
+    /**
+     * The same guard must not fire on a raw material, or every plan keeps every idle line.
+     *
+     * <p>The user has said water comes from a hole in the ground, so a tower that drops it as a
+     * byproduct is not the plan's way of obtaining it. The reported plan of STATUS §14f is exactly
+     * that shape, and without this its row would sit at zero forever for a reason that has nothing to
+     * do with it.
+     */
+    @Test
+    @DisplayName("buying something the user declared raw is not a reason to keep a line")
+    void aRawMaterialIsNotSomethingTheLineWasMaking() {
+        Plan plan = solventLoopPlan();
+        plan.rawMaterial(Fixtures.SOLVENT_B);
+
+        SolveResult result = Solvers.solve(plan);
+
+        assertTrue(result.lines().size() < 4, "the idle lines go: " + result.warnings());
+        assertTrue(result.warnings().stream().anyMatch(w -> w.contains("removed")),
+                "and the plan says they went: " + result.warnings());
+    }
+
+    /**
+     * A working chain that also wants a trickle of something off a loop with no way in.
+     *
+     * <p>Each solvent is made only from the other, and nothing outside supplies either, so the pair
+     * can only run at zero. The casing needs 10 mB of one of them, which leaves the engine no
+     * arithmetic but to buy it — and idles the two lines that were the plan's way of making it. The
+     * plates and the ore keep the rest of the plan honest, so nothing here is a shortfall.
+     */
+    private static Plan solventLoopPlan() {
+        MfpRecipe casing = MfpRecipe.builder("mfp:casing_with_solvent", "mfp:machine", "test")
+                .input(MfpIngredient.of(Fixtures.PLATE, 2))
+                .input(MfpIngredient.of(Fixtures.SOLVENT_B, 10))
+                .output(MfpOutput.of(CASING, 1))
+                .duration(20)
+                .euIn(16)
+                .build();
+
+        Plan plan = new Plan("solvents").target(CASING, 1.0).solverMode(SolverMode.SIMPLEX);
+        plan.rawMaterial(Fixtures.ORE);
+        plan.add(new Line(casing));
+        plan.add(new Line(Fixtures.simple("mfp:plate_from_ore", Fixtures.ORE, 1, Fixtures.PLATE, 1, 10, 8)));
+        plan.add(new Line(Fixtures.simple("mfp:concentrate",
+                Fixtures.SOLVENT_A, 9000, Fixtures.SOLVENT_B, 1000, 20, 8)));
+        plan.add(new Line(Fixtures.simple("mfp:dilute",
+                Fixtures.SOLVENT_B, 1000, Fixtures.SOLVENT_A, 9000, 20, 8)));
+        return plan;
     }
 
     @Test
