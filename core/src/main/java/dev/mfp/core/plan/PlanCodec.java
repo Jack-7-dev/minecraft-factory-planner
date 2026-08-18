@@ -3,10 +3,8 @@ package dev.mfp.core.plan;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonPrimitive;
 import dev.mfp.core.model.MfpKey;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -134,17 +132,7 @@ public final class PlanCodec {
             json.addProperty("forceLimit", config.forceLimit());
         }
 
-        JsonObject options = new JsonObject();
-        config.structureOptions().forEach((name, value) -> {
-            if (value instanceof Number number) {
-                options.addProperty(name, number);
-            } else if (value instanceof Boolean flag) {
-                options.addProperty(name, flag);
-            } else if (value != null) {
-                options.addProperty(name, String.valueOf(value));
-            }
-        });
-        json.add("options", options);
+        json.add("options", OptionCodec.write(config.structureOptions()));
         return json;
     }
 
@@ -283,28 +271,7 @@ public final class PlanCodec {
     }
 
     private static MachineConfig readConfig(JsonObject json) {
-        Map<String, Object> options = new LinkedHashMap<>();
-        for (Map.Entry<String, JsonElement> entry : object(json, "options").entrySet()) {
-            JsonElement value = entry.getValue();
-            if (!(value instanceof JsonPrimitive primitive)) {
-                continue;
-            }
-            if (primitive.isNumber()) {
-                // Normalised to Integer or Double rather than left as gson's own lazy number.
-                // Everything that *reads* an option goes through `Number`, so the arithmetic was
-                // never affected — but a config read back from a file compared unequal to the one
-                // written, which is exactly the claim M9's round trip makes.
-                double number = primitive.getAsDouble();
-                options.put(entry.getKey(),
-                        number == Math.rint(number) && Math.abs(number) <= Integer.MAX_VALUE
-                                ? (Object) (int) number
-                                : (Object) number);
-            } else if (primitive.isBoolean()) {
-                options.put(entry.getKey(), primitive.getAsBoolean());
-            } else {
-                options.put(entry.getKey(), primitive.getAsString());
-            }
-        }
+        Map<String, Object> options = OptionCodec.read(object(json, "options"));
         return new MachineConfig(
                 json.has("machine") && !json.get("machine").isJsonNull()
                         ? json.get("machine").getAsString() : null,
