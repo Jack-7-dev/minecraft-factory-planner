@@ -605,6 +605,19 @@ public final class Plan {
      * blacklist, raw materials and free items deliberately survive — they are the user's intent,
      * and re-expansion exists to apply them, not to discard them.
      */
+    /**
+     * Drop particular lines, keeping everything else about the plan.
+     *
+     * <p>For the one thing that can only be known after a solve: a line the plan turned out not to
+     * need at all. The user's pins are untouched, so if demand for that item ever appears the same
+     * recipe comes back — what is being removed is a line, not a decision.
+     *
+     * @return how many lines were removed
+     */
+    public int removeLines(java.util.Collection<Line> lines) {
+        return root.remove(lines);
+    }
+
     public Plan clearLines() {
         root.clear();
         if (solverModeDerived) {

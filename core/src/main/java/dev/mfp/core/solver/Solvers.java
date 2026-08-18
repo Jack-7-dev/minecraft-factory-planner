@@ -1,7 +1,9 @@
 package dev.mfp.core.solver;
 
 import dev.mfp.core.model.Confidence;
+import dev.mfp.core.model.MfpKey;
 import dev.mfp.core.plan.Line;
+import dev.mfp.core.plan.LineNode;
 import dev.mfp.core.plan.MachineConfig;
 import dev.mfp.core.plan.Plan;
 import dev.mfp.core.plan.SolverMode;
@@ -48,7 +50,131 @@ public final class Solvers {
         return solve(plan, ThroughputResolver.BASE);
     }
 
+    /**
+     * Solve, and if the answer says a line is not needed, try the plan without it.
+     *
+     * <p>A whole-plan engine can decide a line should run at zero — or at a <em>negative</em> rate,
+     * meaning the plan could only balance by running that machine backwards, at which point the
+     * matrix engine clamps it to zero and admits in a warning that the remaining numbers no longer
+     * balance. Both used to be left in the plan as a grey row at zero, which is two bad answers at
+     * once: it shows a machine the player must not build, and every other number was computed
+     * alongside a line that is not really there.
+     *
+     * <p>The case that found it: a plan making polyvinyl butyral pins the fermented-biomass
+     * distillation tower to make fertiliser for a greenhouse, and that tower's ethanol byproduct
+     * covers the plan's whole ethanol demand — so the biomass tower beside it has nothing to do,
+     * and the system can only balance by unmaking ethanol.
+     *
+     * <p><b>The result is only kept if it did not make the plan worse</b>, and that guard is not
+     * theoretical: on the very plan above, dropping the dead line leaves the biomass loop with
+     * nothing anchoring its scale, and the engine answers that under-determined system by running
+     * nine lines at zero and <em>importing</em> a fluid the plan was making. A pruned answer that
+     * has to buy something the unpruned one made is not a tidier plan, it is a worse one, so it is
+     * thrown away and the original stands — grey row, warning and all. The real fix for that plan
+     * is for the chooser to notice the byproduct before it picks a second producer, which is v3
+     * (PLAN §13a item 1).
+     *
+     * <p>One pass, not a loop. Each removal changes what the remaining lines have to do, and
+     * chasing that to a fixpoint is how one dead line became nine.
+     *
+     * <p><b>The sequential pass is exempt.</b> There a line at zero can just as easily mean the plan
+     * is in the wrong order — that engine carries demand downward in a single pass, so a line above
+     * the one that needs it never sees any — and deleting a mis-ordered line rather than showing it
+     * would destroy the evidence of the actual fault.
+     *
+     * <p>Removing a line does not remove the decision behind it: the user's pinned recipe stays, so
+     * the line returns the moment anything demands that item again.
+     */
     public static SolveResult solve(Plan plan, ThroughputResolver resolver) {
+        SolveResult result = solveOnce(plan, resolver);
+        List<Line> dead = deadLines(result);
+        if (dead.isEmpty() || !isFlat(plan)) {
+            return result;
+        }
+
+        // The floor as it stands, so a rejected attempt can be put back exactly. Only a flat floor
+        // is attempted at all, which is what makes this restore complete rather than approximate.
+        List<LineNode> before = plan.root().nodes();
+        int dropped = plan.removeLines(dead);
+        SolveResult pruned = solveOnce(plan, resolver);
+        if (dropped > 0 && !importsMore(pruned, result)) {
+            return withNote(pruned, dropped);
+        }
+        plan.root().clear().addAll(before);
+        return result;
+    }
+
+    /**
+     * Whether the pruned answer has to buy something the original made.
+     *
+     * <p>The one question that separates "that line was not needed" from "removing it took the
+     * anchor out of a loop". Compared by key rather than by amount, because an import appearing at
+     * all is the failure; how much of it is beside the point.
+     */
+    private static boolean importsMore(SolveResult pruned, SolveResult original) {
+        for (MfpKey key : pruned.rawInputs().keySet()) {
+            if (!original.rawInputs().containsKey(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether the plan is one flat floor, which is the only shape this is willing to prune.
+     *
+     * <p>Not a limitation anyone meets today — expansion produces a flat floor — but restoring a
+     * rejected attempt means putting the nodes back exactly, and that is only honest at the top
+     * level. A subfloor's internal order would have to be rebuilt from the inside out, and a prune
+     * that half-restores a plan is worse than one that declines to run.
+     */
+    private static boolean isFlat(Plan plan) {
+        for (LineNode node : plan.root().nodes()) {
+            if (!(node instanceof Line)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The lines this answer says are not needed at all.
+     *
+     * <p>Zero crafts a second, by the same epsilon the rest of the solver rounds with. A line
+     * running at a millionth of a machine is doing something and stays.
+     */
+    private static List<Line> deadLines(SolveResult result) {
+        if (result.engine() == SolverMode.SEQUENTIAL) {
+            return List.of();
+        }
+        List<Line> dead = new ArrayList<>();
+        for (LineResult line : result.lines()) {
+            if (line.isIdle()) {
+                dead.add(line.line());
+            }
+        }
+        return dead;
+    }
+
+    /**
+     * Say that lines were removed, because a row vanishing without explanation is its own bug report.
+     *
+     * <p>Usually the line was one the plan added itself and the user never knew about, but it can be
+     * one they pinned — and being told "nothing here needed it" is the difference between a planner
+     * that answered and one that lost their choice.
+     */
+    private static SolveResult withNote(SolveResult result, int dropped) {
+        List<String> warnings = new ArrayList<>(result.warnings());
+        warnings.add(dropped == 1
+                ? "one line was removed: nothing in the plan demanded anything it makes"
+                : dropped + " lines were removed: nothing in the plan demanded anything they make");
+        return new SolveResult(result.lines(), result.byLine(), result.products(),
+                result.rawInputs(), result.byproducts(), result.unsatisfied(),
+                result.euDrawPerSecond(), result.euGeneratedPerSecond(), result.steamDrawPerSecond(),
+                result.confidence(), warnings, result.engine());
+    }
+
+    private static SolveResult solveOnce(Plan plan, ThroughputResolver resolver) {
         if (plan.solverMode() == SolverMode.SIMPLEX) {
             return simplexOr(plan, resolver, null);
         }
