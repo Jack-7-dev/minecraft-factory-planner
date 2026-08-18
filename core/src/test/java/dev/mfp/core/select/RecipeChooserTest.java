@@ -7,6 +7,7 @@ import dev.mfp.core.model.MfpMachine;
 import dev.mfp.core.model.MfpOutput;
 import dev.mfp.core.model.MfpRecipe;
 import dev.mfp.core.plan.Line;
+import dev.mfp.core.plan.MachineConfig;
 import dev.mfp.core.plan.Plan;
 import dev.mfp.core.plan.Preferences;
 import dev.mfp.core.plan.SolverMode;
@@ -233,7 +234,7 @@ class RecipeChooserTest {
     }
 
     @Test
-    @DisplayName("finding a loop switches an AUTO plan to the matrix engine")
+    @DisplayName("finding a loop switches an AUTO plan to the whole-plan engine")
     void cycleSwitchesSolverMode() {
         RecipeIndex index = indexOf(
                 recipe("mfp:acid", SALT, 1, ACID, 1),
@@ -242,7 +243,9 @@ class RecipeChooserTest {
         Plan plan = new Plan("test").target(ACID, 1);
         new RecipeChooser(index).expandInto(plan);
 
-        assertEquals(SolverMode.MATRIX, plan.solverMode());
+        // Simplex since M12: the derived mode says a whole-plan engine is needed, and the one that
+        // can also hold an inequality is the one it names.
+        assertEquals(SolverMode.SIMPLEX, plan.solverMode());
     }
 
     @Test
@@ -509,8 +512,8 @@ class RecipeChooserTest {
      * notice it and switch engines by hand.
      */
     @Test
-    @DisplayName("a shared byproduct sends an acyclic plan to the matrix engine")
-    void sharedByproductsDeriveTheMatrixEngine() {
+    @DisplayName("a shared byproduct sends an acyclic plan to the whole-plan engine")
+    void sharedByproductsDeriveTheWholePlanEngine() {
         // Smelting ore gives an ingot and some slag; the acid line eats the slag.
         MfpRecipe smelt = MfpRecipe.builder("mfp:smelt", "mfp:machine", "test")
                 .input(MfpIngredient.of(ORE, 1))
@@ -528,8 +531,38 @@ class RecipeChooserTest {
         ChooserResult result = new RecipeChooser(indexOf(smelt, fromSlag, plate)).expandInto(plan);
 
         assertFalse(result.requiresMatrixSolver(), "there is no loop here, only a shared byproduct");
-        assertEquals(SolverMode.MATRIX, plan.solverMode());
+        assertEquals(SolverMode.SIMPLEX, plan.solverMode());
         assertTrue(plan.solverModeDerived(), "worked out, so a later expansion may take it back");
+    }
+
+    /**
+     * A plan may now have both a shared byproduct and a machine limit, which it could not before.
+     *
+     * <p>The derived mode used to be the matrix engine, which reports a limit as ignored (§5b.6), so
+     * a plan carrying one was left on the sequential pass — and the sequential pass is the engine
+     * that cannot feed a line from a byproduct above it. The user had to give up one of the two.
+     * Since M12 the whole-plan engine is the simplex, which holds both.
+     */
+    @Test
+    @DisplayName("a shared byproduct and a machine limit no longer rule each other out")
+    void aSharedByproductWithAMachineLimitStillGetsAWholePlanEngine() {
+        MfpRecipe smelt = MfpRecipe.builder("mfp:smelt", "mfp:machine", "test")
+                .input(MfpIngredient.of(ORE, 1))
+                .output(MfpOutput.of(INGOT, 1))
+                .output(MfpOutput.of(SALT, 1))
+                .duration(20).euIn(16).minTier(1).build();
+        MfpRecipe fromSlag = recipe("mfp:acid", SALT, 1, ACID, 1);
+        MfpRecipe plate = MfpRecipe.builder("mfp:plate", "mfp:machine", "test")
+                .input(MfpIngredient.of(INGOT, 1))
+                .input(MfpIngredient.of(ACID, 1))
+                .output(MfpOutput.of(PLATE, 1))
+                .duration(20).euIn(16).minTier(1).build();
+
+        Plan plan = new Plan("plate").target(PLATE, 1).rawMaterial(ORE);
+        plan.configureMachine("mfp:plate", MachineConfig.UNSET.withLimit(1.0, false));
+        new RecipeChooser(indexOf(smelt, fromSlag, plate)).expandInto(plan);
+
+        assertEquals(SolverMode.SIMPLEX, plan.solverMode());
     }
 
     /**

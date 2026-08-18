@@ -193,7 +193,7 @@ public final class Solvers {
 
     private static SolveResult solveOnce(Plan plan, ThroughputResolver resolver) {
         if (plan.solverMode() == SolverMode.SIMPLEX) {
-            return simplexOr(plan, resolver, null);
+            return wholePlan(plan, resolver);
         }
         if (plan.solverMode() != SolverMode.MATRIX) {
             return new SequentialSolver(resolver).solve(plan);
@@ -230,6 +230,66 @@ public final class Solvers {
             }
         }
         return false;
+    }
+
+    /**
+     * The whole-plan path, which is the one a plan reaches on its own: simplex, then the matrix
+     * engine, then the sequential pass.
+     *
+     * <p>M12 turned the order around. The matrix engine was the default and patched its own failures
+     * with a heuristic that ranked candidates on raw flow — which is not a comparison across
+     * different items, and on the pack's polyvinyl butyral chain it chose to discard 99.6% of the
+     * plan's own ethylene and inflate the plan twentyfold (STATUS §14f.2). The simplex engine owns
+     * that case by construction, because it allows over-production rather than forbidding it, and it
+     * answered the same plan correctly with no relaxation at all.
+     *
+     * <p><b>The matrix engine is still here, and it is a fallback rather than a rival.</b> It is
+     * tried when simplex fails outright — an unbounded programme, or the iteration cap — because two
+     * engines built from the same columns fail at different things, and an answer from either beats
+     * the sequential pass on a plan with a loop in it. It is <em>not</em> tried when the plan carries
+     * an inequality, because it would answer while ignoring the very setting the user set.
+     *
+     * <p>Ambiguity does not go to it. Both engines now reach that verdict (M12 item 1) and it is a
+     * statement about the plan rather than about the engine, so asking the other one is asking a
+     * question already answered.
+     */
+    private static SolveResult wholePlan(Plan plan, ThroughputResolver resolver) {
+        try {
+            return new SimplexSolver(resolver).solve(plan);
+        } catch (SimplexSolver.AmbiguousPlanException ambiguous) {
+            return fallback(plan, resolver, ambiguous.diagnostics(),
+                    "this plan has more than one answer and nothing in it says which, so these "
+                            + "numbers come from the sequential pass");
+        } catch (RuntimeException failure) {
+            if (!hasInequality(plan)) {
+                try {
+                    return withNote(new MatrixSolver(resolver).solve(plan),
+                            "the simplex engine could not solve this plan, so these numbers come "
+                                    + "from the matrix engine: " + failure.getMessage());
+                } catch (RuntimeException second) {
+                    return fallback(plan, resolver,
+                            List.of(String.valueOf(failure.getMessage()),
+                                    String.valueOf(second.getMessage())),
+                            "neither whole-plan engine could solve this plan, so these numbers come "
+                                    + "from the sequential pass and cannot close any loop it "
+                                    + "contains");
+                }
+            }
+            return fallback(plan, resolver, List.of(String.valueOf(failure.getMessage())),
+                    "the simplex engine could not solve this plan, so these numbers come from the "
+                            + "sequential pass and cannot close any loop the plan contains");
+        }
+    }
+
+    /** The same answer carrying one more warning. */
+    private static SolveResult withNote(SolveResult result, String warning) {
+        List<String> warnings = new ArrayList<>();
+        warnings.add(warning);
+        warnings.addAll(result.warnings());
+        return new SolveResult(result.lines(), result.byLine(), result.products(),
+                result.rawInputs(), result.byproducts(), result.unsatisfied(),
+                result.euDrawPerSecond(), result.euGeneratedPerSecond(), result.steamDrawPerSecond(),
+                result.confidence(), warnings, result.engine());
     }
 
     private static SolveResult simplexOr(Plan plan, ThroughputResolver resolver,

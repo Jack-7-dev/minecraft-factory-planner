@@ -381,15 +381,15 @@ public final class RecipeChooser {
      * Expand a plan's targets into lines and install them on its root floor.
      *
      * <p>The plan is left ready to solve: lines ordered, machines chosen, and the solver mode moved
-     * to {@link SolverMode#MATRIX} if a loop was found and the plan was on {@link SolverMode#AUTO}.
+     * to {@link SolverMode#SIMPLEX} if a loop was found and the plan was on {@link SolverMode#AUTO}.
      */
     public ChooserResult expandInto(Plan plan) {
         ChooserResult result = expand(plan);
         result.lines().forEach(plan::add);
-        if (plan.solverMode() == SolverMode.AUTO && needsMatrix(plan, result)) {
+        if (plan.solverMode() == SolverMode.AUTO && needsWholePlanEngine(result)) {
             // Derived, not chosen: a later expansion that finds no loop must be free to go back to
-            // AUTO, or "needs the matrix engine" degrades into "once needed it".
-            plan.deriveSolverMode(SolverMode.MATRIX);
+            // AUTO, or "needs a whole-plan engine" degrades into "once needed one".
+            plan.deriveSolverMode(SolverMode.SIMPLEX);
         }
         return result;
     }
@@ -405,17 +405,15 @@ public final class RecipeChooser {
      * question, and it forced the user to reach for the matrix engine by hand on every chain with a
      * shared byproduct.
      *
-     * <p>Not simply "always use the matrix engine", because it is not strictly better. It cannot
-     * honour a machine limit or a line percentage (§5b.6) — it reports them as ignored — and it needs
-     * the plan to describe exactly one factory, so two lines making the same item leave it with no
-     * unique answer at all. Where the user has set a limit, the engine that honours it is the right
-     * one, and that is what the last clause here protects.
+     * <p>Which engine that is, is {@code Solvers}' business and not this one's — the mode derived
+     * here says <em>a whole-plan engine is needed</em>. It used to say "matrix", and the plan then
+     * had to be checked for a machine limit before the mode could be derived at all, because the
+     * matrix engine reports a limit as ignored (§5b.6): a plan with both a shared byproduct and a
+     * limit had to give one of them up. Since M12 the whole-plan engine is the simplex, which
+     * honours a limit and a percentage, so that clause is gone and a plan can have both.
      */
-    private static boolean needsMatrix(Plan plan, ChooserResult result) {
-        if (result.requiresMatrixSolver()) {
-            return true;
-        }
-        return sharesAByproduct(result.lines()) && !usesMachineLimits(plan);
+    private static boolean needsWholePlanEngine(ChooserResult result) {
+        return result.requiresMatrixSolver() || sharesAByproduct(result.lines());
     }
 
     /** Whether some line eats a byproduct of another, which a single downward pass may not reach. */
@@ -435,12 +433,6 @@ public final class RecipeChooser {
             }
         }
         return false;
-    }
-
-    private static boolean usesMachineLimits(Plan plan) {
-        return plan.machineConfigs().values().stream().anyMatch(MachineConfig::hasLimit)
-                || plan.allLines().stream().anyMatch(line -> line.machine() != null
-                        && line.machine().hasLimit());
     }
 
     /**
