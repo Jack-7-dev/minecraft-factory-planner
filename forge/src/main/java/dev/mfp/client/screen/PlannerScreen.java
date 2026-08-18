@@ -791,10 +791,10 @@ public final class PlannerScreen extends Screen {
             new Table.Column("", 0.45f,
                     "Move a line up or down. Display order only - the solver's own order is "
                             + "topological and is not changed by this."),
-            new Table.Column("Products", 2.6f,
+            new Table.Column("Products", 1.8f,
                     "What this line delivers. Hover it for the recipe behind it, and click it to "
                             + "see every other way of making the same thing."),
-            new Table.Column("Machine", 2.4f, "Click to choose the machine, its tier and what is built into it."),
+            new Table.Column("Machine", 3.2f, "Click to choose the machine, its tier and what is built into it."),
             new Table.Column("Tier", 0.6f, "Click to configure the machine."),
             new Table.Column("Machines", 1.0f,
                     "Fractional need, with the number to build in brackets. Click it to size the "
