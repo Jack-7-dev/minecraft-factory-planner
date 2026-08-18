@@ -97,27 +97,43 @@ public final class Solvers {
         List<LineNode> before = plan.root().nodes();
         int dropped = plan.removeLines(dead);
         SolveResult pruned = solveOnce(plan, resolver);
-        if (dropped > 0 && !importsMore(pruned, result)) {
+        List<MfpKey> appeared = newImports(pruned, result);
+        if (dropped > 0 && appeared.isEmpty()) {
             return withNote(pruned, dropped);
         }
         plan.root().clear().addAll(before);
-        return result;
+        // Why the row is still there, in the one place a user will look for it. "This line does
+        // nothing" invites deleting it by hand; "removing it makes the plan buy its own ingredient"
+        // is the fact that stops them, and naming the ingredient gives the next question an answer.
+        return appeared.isEmpty() ? result : withKeptNote(result, appeared);
     }
 
     /**
-     * Whether the pruned answer has to buy something the original made.
+     * What the pruned answer would have to buy that the original made.
      *
      * <p>The one question that separates "that line was not needed" from "removing it took the
      * anchor out of a loop". Compared by key rather than by amount, because an import appearing at
-     * all is the failure; how much of it is beside the point.
+     * all is the failure and how much of it is beside the point. Returned rather than counted, so
+     * the plan can name the item it would have started buying.
      */
-    private static boolean importsMore(SolveResult pruned, SolveResult original) {
+    private static List<MfpKey> newImports(SolveResult pruned, SolveResult original) {
+        List<MfpKey> appeared = new ArrayList<>();
         for (MfpKey key : pruned.rawInputs().keySet()) {
             if (!original.rawInputs().containsKey(key)) {
-                return true;
+                appeared.add(key);
             }
         }
-        return false;
+        return appeared;
+    }
+
+    private static SolveResult withKeptNote(SolveResult result, List<MfpKey> appeared) {
+        List<String> warnings = new ArrayList<>(result.warnings());
+        warnings.add("a line at zero was left in the plan: removing it would make the plan import "
+                + appeared + " rather than make it");
+        return new SolveResult(result.lines(), result.byLine(), result.products(),
+                result.rawInputs(), result.byproducts(), result.unsatisfied(),
+                result.euDrawPerSecond(), result.euGeneratedPerSecond(), result.steamDrawPerSecond(),
+                result.confidence(), warnings, result.engine());
     }
 
     /**
