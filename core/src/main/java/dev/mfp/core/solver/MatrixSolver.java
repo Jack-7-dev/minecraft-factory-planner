@@ -159,6 +159,10 @@ public final class MatrixSolver {
                     + "to over-produce or import it - everything else still balances");
             Set<MfpKey> relaxed = new LinkedHashSet<>(free);
             relaxed.add(leak);
+            // Not guarded, and it must not be: if freeing that item still leaves a line wanting to
+            // run backwards, this engine has nothing further to offer and the failure belongs to
+            // Solvers, which hands the over-constrained case to simplex. Catching it here would put
+            // the cost-blind relaxation back in charge of a plan it has already failed to describe.
             return solveWith(plan, columns, idle, targets, relaxed, warnings);
         }
     }
@@ -202,6 +206,16 @@ public final class MatrixSolver {
                 // that is about to be thrown away must not take the real lists with it.
                 SolveResult result = solveWith(plan, new ArrayList<>(columns), new ArrayList<>(idle),
                         targets, attempt, new ArrayList<>());
+                // A relaxation is a leak, not a landfill. Freeing an item says "you may end up with
+                // some spare"; if the answer it produces throws away nearly everything the plan
+                // makes of that item, the item was not leaking - the plan was being propped up by
+                // it, and freeing it has bought a solution by abandoning a whole branch. The pack's
+                // polyvinyl butyral chain reached exactly that: freeing ethylene discards 99.6% of
+                // the ethylene it makes, which scores better than every honest alternative under a
+                // rule that prefers any surplus to any import, and inflates the plan twentyfold.
+                if (isAbandoned(result, candidate)) {
+                    continue;
+                }
                 // Surplus beats import, whatever the magnitudes. Letting a factory keep spare
                 // essence costs a barrel; letting it import an intermediate invents a supply chain
                 // the user never asked for, and would quietly excuse a plan that does not work.
@@ -217,6 +231,28 @@ public final class MatrixSolver {
             }
         }
         return best;
+    }
+
+    /**
+     * Whether freeing this item bought a solution by throwing the item away.
+     *
+     * <p>Scale-free on purpose. The flow ranking beside this compares raw magnitudes across
+     * different items, which is not a comparison at all — millibuckets of ethylene against items of
+     * fertiliser — and it is why a vast surplus can beat a small one. A <em>fraction</em> of the
+     * item's own production is the same quantity whatever the item is, and "the plan discards
+     * almost all of what it makes" is the thing being ruled out.
+     */
+    private static boolean isAbandoned(SolveResult result, MfpKey candidate) {
+        Double surplus = result.byproducts().get(candidate);
+        if (surplus == null || surplus <= 0) {
+            return false;
+        }
+        double produced = 0;
+        for (LineResult line : result.lines()) {
+            produced += line.outputs().getOrDefault(candidate, 0.0);
+            produced += line.byproducts().getOrDefault(candidate, 0.0);
+        }
+        return produced > 0 && surplus / produced > ABANDONED_FRACTION;
     }
 
     private SolveResult solveWith(Plan plan, List<Column> columns, List<IdleLine> idle,
@@ -446,15 +482,33 @@ public final class MatrixSolver {
             }
         }
 
+        // A negative rate is this engine failing, and it used to be reported as an answer: the line
+        // was clamped to zero and a warning admitted the remaining numbers no longer balance. A
+        // number the engine has declared wrong is not a number to draw on a screen.
+        //
+        // What it means is that some item is produced in greater quantity than anything wants, while
+        // having both a producer and a consumer in the plan and therefore being required to net to
+        // exactly zero. The only arithmetic left is to run one of its producers backwards. That is
+        // the over-constrained case in disguise — the plan cannot balance exactly — and it already
+        // has an owner: the simplex engine, which allows over-production by construction rather than
+        // forbidding it. So this is raised for {@code Solvers} to route, and deliberately raised
+        // with no conflicting items, so the single-item relaxation below does not try to rescue it
+        // first. It cannot: the pack's polyvinyl butyral chain needs both fertiliser and ethanol
+        // freed before its biomass loop is describable, and asked to pick one, the relaxation picks
+        // ethylene and inflates the plan twentyfold (STATUS §14f.1).
+        List<String> reversed = new ArrayList<>();
         for (int col = 0; col < lineColumns; col++) {
             if (solution[col] < -ItemFlows.EPSILON) {
-                warnings.add(columns.get(col).line().recipe().id() + " solved to a negative rate, "
-                        + "which means the plan can only balance by running it backwards; clamped to "
-                        + "zero, so the remaining numbers do not balance");
-                solution[col] = 0.0;
+                reversed.add(columns.get(col).line().recipe().id()
+                        + " would have to run backwards for the plan to balance");
             } else if (solution[col] < 0) {
+                // Numerical dust either side of zero, which is a rate of zero and nothing else.
                 solution[col] = 0.0;
             }
+        }
+        if (!reversed.isEmpty()) {
+            throw new UnsolvableSystemException("this plan cannot balance exactly",
+                    reversed, true, List.of());
         }
         return solution;
     }
@@ -521,6 +575,17 @@ public final class MatrixSolver {
      * and so two surpluses still sort by size against each other.
      */
     private static final double SURPLUS_PREFERENCE = 1e12;
+
+    /**
+     * How much of an item a relaxation may discard before it stops counting as a leak.
+     *
+     * <p>Nine tenths is a judgement, not a measurement, and it is meant to catch only the extreme:
+     * a plan keeping a tenth of what it makes is a factory with spare, and one keeping half a
+     * percent has had a branch switched off to make the arithmetic work. Nothing measured sits near
+     * the line - the case this exists for discards 99.6%, and the honest alternatives on the same
+     * plan discard a few percent at most.
+     */
+    private static final double ABANDONED_FRACTION = 0.9;
 
     /** How many single-item relaxations to try before giving up and falling back. */
     private static final int RELAX_ATTEMPTS = 24;
