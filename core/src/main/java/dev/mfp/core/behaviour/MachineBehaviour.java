@@ -33,6 +33,24 @@ public interface MachineBehaviour {
     ThroughputResult apply(ThroughputResult accumulated, BehaviourContext context);
 
     /**
+     * Whether this behaviour could apply to {@code machine} for some recipe it runs.
+     *
+     * <p>Asked without a recipe, and only ever to decide whether to <em>offer</em> this behaviour's
+     * {@link #options()} for a machine — the standing-build screen describes a machine the player
+     * owns, not a line, so there is no recipe to hand. It must never be used to compute a number:
+     * {@link #appliesTo} is the question with an answer, and this one can only be a claim about the
+     * machine in general.
+     *
+     * <p>False by default, and the registry does not need it for the usual case: a behaviour matched
+     * by a modifier id is offered because the machine <em>declares</em> that modifier, which is a
+     * fact rather than a guess. Only a shape-matched behaviour — one GregTech attaches with no name
+     * to match on — has to answer for itself.
+     */
+    default boolean appliesToMachine(dev.mfp.core.model.MfpMachine machine) {
+        return false;
+    }
+
+    /**
      * The build choices this behaviour reads from {@code MachineConfig.structureOptions}.
      *
      * <p>Empty by default, which is the honest answer for a behaviour whose rate follows from the

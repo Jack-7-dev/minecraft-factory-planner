@@ -5,8 +5,12 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import dev.mfp.core.index.RecipeIndex;
 import dev.mfp.core.model.MfpKey;
+import dev.mfp.core.model.MfpMachine;
 import dev.mfp.core.model.MfpRecipe;
+import dev.mfp.core.behaviour.OptionSpec;
+import dev.mfp.core.plan.MachineDefaults;
 import dev.mfp.core.plan.Preferences;
+import dev.mfp.plan.PlanSession;
 import dev.mfp.index.MfpIndexHolder;
 import dev.mfp.core.plan.KeySpec;
 import dev.mfp.plan.PreferenceStore;
@@ -67,6 +71,14 @@ public final class MfpDefaultsCommand {
                                 .executes(ctx -> expansion(ctx.getSource(),
                                         StringArgumentType.getString(ctx, "mode")))))
 
+                // How one machine of the player's is built (M12): the finest of the preferences and
+                // the one that moves a multiblock's numbers most, so the headless check has to be
+                // able to set it too.
+                .then(Commands.literal("machine")
+                        .then(Commands.argument("spec", StringArgumentType.greedyString())
+                                .executes(ctx -> machine(ctx.getSource(),
+                                        StringArgumentType.getString(ctx, "spec")))))
+
                 .then(Commands.literal("reload").executes(ctx -> {
                     PreferenceStore.reload();
                     return report(ctx.getSource());
@@ -96,6 +108,10 @@ public final class MfpDefaultsCommand {
         send(source, "  blocked items: " + preferences.blockedItems().size(), ChatFormatting.AQUA);
         preferences.blockedItems().forEach(key ->
                 send(source, "    " + key, ChatFormatting.WHITE));
+
+        send(source, "  machine builds: " + preferences.machineDefaults().size(), ChatFormatting.AQUA);
+        preferences.machineDefaults().forEach((machineId, build) ->
+                send(source, "    " + machineId + ": " + describe(build), ChatFormatting.WHITE));
         return 1;
     }
 
@@ -179,6 +195,101 @@ public final class MfpDefaultsCommand {
         PreferenceStore.save();
         send(source, "MFP: " + key + " is made by " + recipeId + " from now on", ChatFormatting.GREEN);
         return 1;
+    }
+
+    private static String describe(MachineDefaults build) {
+        StringBuilder text = new StringBuilder();
+        if (build.hasTier()) {
+            text.append("tier ").append(build.tier());
+        }
+        if (build.hasParallels()) {
+            text.append(text.isEmpty() ? "" : ", ").append(build.parallels()).append(" parallel");
+        }
+        build.structureOptions().forEach((key, value) ->
+                text.append(text.isEmpty() ? "" : ", ").append(key).append('=').append(value));
+        return text.isEmpty() ? "nothing stated" : text.toString();
+    }
+
+    /**
+     * {@code /mfp defaults machine <machine id> [tier|parallels|<option> <value>|clear]}.
+     *
+     * <p>With no field it reports the build and, more usefully, the fields that machine actually
+     * has — asked of the behaviours that will compute its rate, so the answer is the pack's rather
+     * than a list written here that a pack update would falsify.
+     */
+    private static int machine(CommandSourceStack source, String spec) {
+        String[] parts = spec.trim().split("\s+");
+        RecipeIndex index = MfpIndexHolder.get(source.getServer());
+        MfpMachine machine = index.machine(parts[0]);
+        if (machine == null) {
+            // Refused rather than stored: a build keyed on a typo sits in the file doing nothing,
+            // and every plan goes on quietly reporting the machine as undescribed.
+            send(source, "MFP: no such machine: " + parts[0], ChatFormatting.RED);
+            return 0;
+        }
+        Preferences preferences = PreferenceStore.get();
+        MachineDefaults build = preferences.machineDefaults(machine.id());
+
+        if (parts.length == 1) {
+            send(source, machine.id() + " (" + machine.displayName() + "): " + describe(build),
+                    ChatFormatting.GOLD);
+            send(source, "  tier" + (machine.multiblock() ? "" : " - fixed, this is a single block")
+                    + ", parallels", ChatFormatting.WHITE);
+            for (OptionSpec option : PlanSession.resolverFor(index).registry().optionsFor(machine)) {
+                send(source, "  " + option.key() + (option.choices().isEmpty()
+                                ? " - " + option.minimum() + ".." + option.maximum()
+                                : " - " + option.choices()),
+                        ChatFormatting.WHITE);
+            }
+            return 1;
+        }
+
+        if (parts.length == 2 && "clear".equals(parts[1])) {
+            preferences.clearMachineDefaults(machine.id());
+            PreferenceStore.save();
+            send(source, "MFP: " + machine.id() + " is no longer described", ChatFormatting.GREEN);
+            return 1;
+        }
+        if (parts.length < 3) {
+            send(source, "MFP: usage - /mfp defaults machine <machine id> "
+                    + "<tier|parallels|option key> <value|clear>", ChatFormatting.RED);
+            return 0;
+        }
+
+        String field = parts[1];
+        String value = parts[2];
+        boolean clearing = "clear".equals(value);
+        MachineDefaults updated;
+        if ("tier".equals(field)) {
+            updated = clearing ? build.withoutTier() : build.withTier(integer(value));
+        } else if ("parallels".equals(field)) {
+            updated = clearing ? build.withoutParallels() : build.withParallels(integer(value));
+        } else if (clearing) {
+            updated = build.withoutOption(field);
+        } else {
+            // Typed as the file types it: an option read as a number by one path and as a string by
+            // the other is a build that compares unequal to itself across a save.
+            Integer number = parseInteger(value);
+            updated = build.withOption(field, number == null ? (Object) value : (Object) number);
+        }
+        preferences.machineDefaults(machine.id(), updated);
+        PreferenceStore.save();
+        send(source, "MFP: " + machine.id() + " is " + describe(
+                preferences.machineDefaults(machine.id())), ChatFormatting.GREEN);
+        return 1;
+    }
+
+    private static int integer(String value) {
+        Integer parsed = parseInteger(value);
+        return parsed == null ? 0 : parsed;
+    }
+
+    private static Integer parseInteger(String value) {
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 
     private static void send(CommandSourceStack source, String message, ChatFormatting colour) {

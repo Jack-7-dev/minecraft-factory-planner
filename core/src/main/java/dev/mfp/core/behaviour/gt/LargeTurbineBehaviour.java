@@ -44,6 +44,15 @@ public final class LargeTurbineBehaviour implements MachineBehaviour {
     }
 
     @Override
+    public boolean appliesToMachine(dev.mfp.core.model.MfpMachine machine) {
+        // Read off the name, because the real test is "does it run a generating recipe" and there is
+        // no recipe here. Deliberately narrow: this decides only whether the standing-build screen
+        // offers a rotor field, so a turbine this misses is one the player configures per line as
+        // before, while a false positive would ask them about a rotor a machine has no holder for.
+        return machine != null && machine.multiblock() && machine.id().contains("turbine");
+    }
+
+    @Override
     public List<OptionSpec> options() {
         return List.of(
                 OptionSpec.integer(OPTION_ROTOR_EFFICIENCY, "Rotor efficiency (%)",

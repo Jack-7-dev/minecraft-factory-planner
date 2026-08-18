@@ -8,6 +8,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.mfp.core.model.MfpKey;
 import dev.mfp.core.plan.KeySpec;
+import dev.mfp.core.plan.MachineDefaults;
+import dev.mfp.core.plan.OptionCodec;
 import dev.mfp.core.plan.Preferences;
 import net.minecraftforge.fml.loading.FMLPaths;
 import org.slf4j.Logger;
@@ -35,14 +37,17 @@ import java.util.Map;
  *   "autoResolve": true,
  *   "recipes":  { "gtceu:steel_ingot": "gtceu:electric_blast_furnace/steel" },
  *   "items":    [ "minecraft:spruce_log" ],
- *   "blocked":  [ "mysticalagriculture:inferium_essence" ]
+ *   "blocked":  [ "mysticalagriculture:inferium_essence" ],
+ *   "machines": {
+ *     "gtceu:electric_blast_furnace": { "tier": 4, "options": { "coil": "hss_g" } }
+ *   }
  * }
  * </pre>
  *
  * <p>Hand-editable, in the same {@code [fluid:]namespace:path} spelling {@code /mfp plan} accepts.
  * <b>Loading is lenient</b> exactly as plan loading is: a preference naming a recipe this pack no
  * longer has costs that entry, and the scorer chooses again. A preference file that refused to load
- * would take four unrelated decisions with it.
+ * would take every unrelated decision with it.
  */
 public final class PreferenceStore {
 
@@ -77,9 +82,9 @@ public final class PreferenceStore {
         current = load();
         if (!current.isEmpty()) {
             LOGGER.info("MFP loaded standing preferences from {}: {} default recipe(s), "
-                            + "{} preferred item(s), {} blocked item(s), tier {}",
+                            + "{} preferred item(s), {} blocked item(s), {} machine build(s), tier {}",
                     file(), current.defaultRecipes().size(), current.preferredItems().size(),
-                    current.blockedItems().size(),
+                    current.blockedItems().size(), current.machineDefaults().size(),
                     current.defaultTier() == Preferences.NO_DEFAULT_TIER ? "unset" : current.defaultTier());
         }
         return current;
@@ -108,6 +113,25 @@ public final class PreferenceStore {
         root.add("recipes", recipes);
         root.add("items", keys(current.preferredItems()));
         root.add("blocked", keys(current.blockedItems()));
+
+        JsonObject machines = new JsonObject();
+        current.machineDefaults().forEach((machineId, defaults) -> {
+            JsonObject entry = new JsonObject();
+            // Each field only when stated. Unset is a real state here — a machine with no coil field
+            // is one MFP still resolves for itself — so writing a placeholder would turn silence
+            // into an answer on the next load.
+            if (defaults.hasTier()) {
+                entry.addProperty("tier", defaults.tier());
+            }
+            if (defaults.hasParallels()) {
+                entry.addProperty("parallels", defaults.parallels());
+            }
+            if (!defaults.structureOptions().isEmpty()) {
+                entry.add("options", OptionCodec.write(defaults.structureOptions()));
+            }
+            machines.add(machineId, entry);
+        });
+        root.add("machines", machines);
 
         try {
             Files.createDirectories(path.getParent());
@@ -153,11 +177,28 @@ public final class PreferenceStore {
             for (JsonElement element : array(root, "blocked")) {
                 key(element).ifPresent(preferences::blockItem);
             }
+            for (Map.Entry<String, JsonElement> entry : object(root, "machines").entrySet()) {
+                try {
+                    preferences.machineDefaults(entry.getKey(),
+                            machineDefaults(entry.getValue().getAsJsonObject()));
+                } catch (RuntimeException e) {
+                    // Lenient per machine, as everything else here is: a build MFP cannot read costs
+                    // that machine's coils, not the whole file's worth of unrelated decisions.
+                    LOGGER.warn("MFP skipped the standing build for '{}': {}", entry.getKey(), e.toString());
+                }
+            }
             return preferences;
         } catch (IOException | RuntimeException e) {
             LOGGER.warn("MFP could not read preferences from {}; ignoring it", path, e);
             return Preferences.none();
         }
+    }
+
+    private static MachineDefaults machineDefaults(JsonObject json) {
+        return new MachineDefaults(
+                json.has("tier") ? json.get("tier").getAsInt() : MachineDefaults.UNSET_TIER,
+                json.has("parallels") ? json.get("parallels").getAsInt() : MachineDefaults.UNSET_PARALLELS,
+                OptionCodec.read(object(json, "options")));
     }
 
     private static java.util.Optional<MfpKey> key(JsonElement element) {

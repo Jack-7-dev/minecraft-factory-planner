@@ -283,6 +283,49 @@ public final class BehaviourRegistry {
     }
 
     /**
+     * The build choices a machine offers, before any recipe is chosen.
+     *
+     * <p>What the standing-build screen is laid out from: the player is describing the blast furnace
+     * they own rather than one line of one plan, so there is no recipe to resolve a chain against.
+     *
+     * <p>Answerable without one because almost every option-declaring behaviour is claimed by a
+     * modifier the machine <em>declares</em> — {@code appliesTo} on those is
+     * {@code context.hasModifier(...)} and nothing else, so asking the machine is asking the same
+     * question. The shape-matched ones, which exist precisely because GregTech left them no name,
+     * answer for themselves through {@link MachineBehaviour#appliesToMachine}.
+     *
+     * <p>The per-line dialog keeps using {@link #chainFor} and stays exact. This is the looser
+     * question and can only err by a field: one offered for a recipe that would not read it, or one
+     * missing that the line dialog still has.
+     */
+    public List<OptionSpec> optionsFor(MfpMachine machine) {
+        if (machine == null) {
+            return List.of();
+        }
+        List<OptionSpec> specs = new ArrayList<>();
+        List<MachineBehaviour> claiming = new ArrayList<>();
+        for (String modifierId : machine.modifierIds()) {
+            MachineBehaviour behaviour = byModifierId.get(modifierId);
+            if (behaviour != null && !claiming.contains(behaviour)) {
+                claiming.add(behaviour);
+            }
+        }
+        for (MachineBehaviour behaviour : shapeMatched) {
+            if (behaviour.appliesToMachine(machine) && !claiming.contains(behaviour)) {
+                claiming.add(behaviour);
+            }
+        }
+        for (MachineBehaviour behaviour : claiming) {
+            for (OptionSpec spec : behaviour.options()) {
+                if (specs.stream().noneMatch(existing -> existing.key().equals(spec.key()))) {
+                    specs.add(spec);
+                }
+            }
+        }
+        return List.copyOf(specs);
+    }
+
+    /**
      * The behaviours to fold, in application order.
      *
      * <p>An empty result means nothing is known about this machine, which the resolver turns into

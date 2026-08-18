@@ -6,6 +6,7 @@ import dev.mfp.core.model.MfpKey;
 import dev.mfp.core.model.MfpMachine;
 import dev.mfp.core.model.MfpRecipe;
 import dev.mfp.core.plan.MachineConfig;
+import dev.mfp.core.plan.MachineDefaults;
 import dev.mfp.core.plan.Plan;
 import dev.mfp.core.plan.Preferences;
 
@@ -207,6 +208,10 @@ public final class MachinePicker {
     /**
      * The same, with the player's standing default tier applied where they have not chosen (M8).
      *
+     * <p>The tier is the blunt end of it. Where the player has described a particular machine —
+     * its coils, its hatch, its rotor — {@link MachineDefaults} for that machine is applied too, and
+     * beats the general tier, because it is the more specific thing they said.
+     *
      * <p>Two things it must not do, and the order of the checks is what stops it. <b>A machine the
      * user picked explicitly stays picked</b> — both the built configuration and the type-level
      * choice are consulted before the tier is looked at, so raising the default tier moves the
@@ -231,12 +236,13 @@ public final class MachinePicker {
         if (chosenId != null) {
             MfpMachine chosen = index.machine(chosenId);
             if (chosen != null && canRun(chosen, recipe)) {
-                return configFor(chosen, recipe, defaultTier);
+                return configFor(chosen, recipe, defaultTier, preferences);
             }
         }
 
         List<MfpMachine> usable = candidates(index, recipe, defaultTier);
-        return usable.isEmpty() ? MachineConfig.UNSET : configFor(usable.get(0), recipe, defaultTier);
+        return usable.isEmpty()
+                ? MachineConfig.UNSET : configFor(usable.get(0), recipe, defaultTier, preferences);
     }
 
     /** Step to the next tier up, keeping every other setting. Null when already at the top. */
@@ -275,10 +281,21 @@ public final class MachinePicker {
     }
 
     private static MachineConfig configFor(MfpMachine machine, MfpRecipe recipe) {
-        return configFor(machine, recipe, Preferences.NO_DEFAULT_TIER);
+        return configFor(machine, recipe, Preferences.NO_DEFAULT_TIER, null);
     }
 
-    private static MachineConfig configFor(MfpMachine machine, MfpRecipe recipe, int defaultTier) {
+    /**
+     * The configuration this machine starts at, before the plan says anything about the line.
+     *
+     * <p>Two standing preferences meet here and they are not the same statement. The default tier is
+     * about the factory — "I build at HV" — and the machine's own build is about one machine — "my
+     * blast furnace has HSS-G coils and an EV hatch". The specific one wins, because a player who
+     * has described a particular machine has said something the general answer cannot know.
+     */
+    private static MachineConfig configFor(MfpMachine machine, MfpRecipe recipe, int defaultTier,
+                                           Preferences preferences) {
+        MachineDefaults build = preferences == null
+                ? MachineDefaults.NONE : preferences.machineDefaults(machine.id());
         int tier = machine.tier();
         if (tier < 0) {
             // A multiblock: its voltage is the hatch's, so it is a build choice rather than a
@@ -286,14 +303,15 @@ public final class MachinePicker {
             // The recipe's own minimum still wins, because a hatch too small to run the recipe is
             // not a plan, it is a machine that never starts.
             tier = Math.max(0, recipe.minTier());
-            if (defaultTier > tier && recipe.usesEnergy()) {
+            int wanted = build.hasTier() ? build.tier() : defaultTier;
+            if (wanted > tier && recipe.usesEnergy()) {
                 // Only where a hatch means anything. A coke oven and a primitive blast furnace take
                 // no power at all, so calling one "tier 3" would be a claim about a structure that
                 // has no voltage — it changes no number and misdescribes the build.
-                tier = defaultTier;
+                tier = wanted;
             }
         }
-        return MachineConfig.of(machine.id(), tier);
+        return build.applyTo(MachineConfig.of(machine.id(), tier));
     }
 
     private static boolean canRun(MfpMachine machine, MfpRecipe recipe) {

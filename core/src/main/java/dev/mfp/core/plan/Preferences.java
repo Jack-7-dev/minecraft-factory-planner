@@ -16,8 +16,8 @@ import java.util.Set;
  * the material they have never set up — and until now every plan was expanded as though none of that
  * existed, so the same corrections had to be made again in every plan.
  *
- * <p>Four preferences, and they are deliberately the same four kinds of decision a {@link Plan}
- * already records per plan:
+ * <p>Five preferences, and they are deliberately the same kinds of decision a {@link Plan} already
+ * records per plan:
  *
  * <ul>
  *   <li><b>Default recipes</b> — {@code Plan.recipeChoices} promoted from plan-local to global.
@@ -25,6 +25,9 @@ import java.util.Set;
  *   <li><b>Blocked items</b> — "I have no inferium essence", which must remove every chain through
  *       it from consideration rather than merely from the display.
  *   <li><b>A default tier</b> — the general form of "lowest tier that can run it".
+ *   <li><b>Machine builds</b> — the tier is the blunt form of this one. What decides a multiblock's
+ *       rate is what the player built inside it, and a coil belongs to the blast furnace rather
+ *       than to every machine at once: see {@link MachineDefaults}.
  * </ul>
  *
  * <p><b>A plan always wins.</b> These are defaults, not rules: a pin, a machine choice or a plan's
@@ -43,6 +46,7 @@ public final class Preferences {
     public static final int NO_DEFAULT_TIER = -1;
 
     private final Map<MfpKey, String> defaultRecipes = new LinkedHashMap<>();
+    private final Map<String, MachineDefaults> machineDefaults = new LinkedHashMap<>();
     private final Set<MfpKey> preferredItems = new LinkedHashSet<>();
     private final Set<MfpKey> blockedItems = new LinkedHashSet<>();
     private int defaultTier = NO_DEFAULT_TIER;
@@ -55,7 +59,7 @@ public final class Preferences {
 
     public boolean isEmpty() {
         return defaultRecipes.isEmpty() && preferredItems.isEmpty() && blockedItems.isEmpty()
-                && defaultTier == NO_DEFAULT_TIER && !autoResolve;
+                && machineDefaults.isEmpty() && defaultTier == NO_DEFAULT_TIER && !autoResolve;
     }
 
     /**
@@ -231,6 +235,48 @@ public final class Preferences {
             }
         }
         return blockedItems.contains(key);
+    }
+
+    // ----------------------------------------------------------- machine builds
+
+    /**
+     * How the player's own copy of each machine is built, by machine id.
+     *
+     * <p>The finest of the standing preferences and the one that moves the numbers most. A tier
+     * says which hatch every multiblock has; this says what is inside one of them — the coils in
+     * the blast furnace, the parallel hatch in the assembly line, the rotor in the turbine — which
+     * is what a multiblock's throughput actually depends on (STATUS §4a.9, §4b.13).
+     */
+    public Map<String, MachineDefaults> machineDefaults() {
+        return Map.copyOf(machineDefaults);
+    }
+
+    /** The player's build for one machine, or {@link MachineDefaults#NONE} when they have not said. */
+    public MachineDefaults machineDefaults(String machineId) {
+        MachineDefaults defaults = machineId == null ? null : machineDefaults.get(machineId);
+        return defaults == null ? MachineDefaults.NONE : defaults;
+    }
+
+    /**
+     * State how a machine is built, or forget it.
+     *
+     * <p>An empty build is stored as no build rather than as an entry saying nothing, so the screens
+     * that list what the player has decided list only decisions — and clearing the last field of a
+     * machine leaves the same state as never having touched it.
+     */
+    public Preferences machineDefaults(String machineId, MachineDefaults defaults) {
+        Objects.requireNonNull(machineId, "machineId");
+        if (defaults == null || defaults.isEmpty()) {
+            machineDefaults.remove(machineId);
+        } else {
+            machineDefaults.put(machineId, defaults);
+        }
+        return this;
+    }
+
+    public Preferences clearMachineDefaults(String machineId) {
+        machineDefaults.remove(machineId);
+        return this;
     }
 
     // -------------------------------------------------------------- default tier

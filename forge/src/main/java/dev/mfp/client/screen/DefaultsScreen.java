@@ -109,6 +109,19 @@ public final class DefaultsScreen extends ModalScreen {
         expansion.bounds(tier.x() + tier.width() + GAP, cursorY,
                 Math.max(120, expansion.preferredWidth()), 14);
         widgets.add(expansion);
+
+        // The fine-grained half of the tier button beside it, because they answer the same question
+        // at different sizes: "I build at HV" and "my blast furnace has HSS-G coils in it".
+        int builds = preferences.machineDefaults().size();
+        TextButton machines = new TextButton(
+                builds == 0 ? "Machines" : "Machines (" + builds + ")",
+                () -> Minecraft.getInstance().setScreen(new MachineDefaultsScreen(this)));
+        machines.tooltip("Describe how your own machines are built - the coils in the blast furnace, "
+                + "the parallel hatch, the rotor, the hatch tier. That is what decides a "
+                + "multiblock's rate, and until you say, MFP reports the line as a guess.");
+        machines.bounds(expansion.x() + expansion.width() + GAP, cursorY,
+                Math.max(80, machines.preferredWidth()), 14);
+        widgets.add(machines);
         cursorY += 14 + GAP + 4;
 
         // Default recipes ------------------------------------------------------

@@ -30,7 +30,15 @@ public enum LineDecision {
     MACHINE("machine chosen"),
 
     /** The user built this machine out — tier, parallels, coils, a limit — for this recipe. */
-    CONFIG("machine configured");
+    CONFIG("machine configured"),
+
+    /**
+     * The build came from the player's standing description of that machine, not from this plan.
+     *
+     * <p>{@link #STANDING_DEFAULT} for builds, and separate from {@link #CONFIG} for the same
+     * reason: this one is changed everywhere at once, so the marker has to say which screen owns it.
+     */
+    STANDING_BUILD("your build for this machine");
 
     private final String label;
 

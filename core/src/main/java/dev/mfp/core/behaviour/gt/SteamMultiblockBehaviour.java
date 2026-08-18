@@ -110,6 +110,12 @@ public class SteamMultiblockBehaviour implements MachineBehaviour {
     }
 
     @Override
+    public boolean appliesToMachine(dev.mfp.core.model.MfpMachine machine) {
+        // The same test: this rule was always about which machine it is, never about the recipe.
+        return machine != null && machineIds.contains(machine.id());
+    }
+
+    @Override
     public List<OptionSpec> options() {
         return List.of(OptionSpec.integer(OPTION_MAX_PARALLELS, "Max parallels",
                 "The most recipes this steam machine runs at once, as its structure allows.", 1, 1024));

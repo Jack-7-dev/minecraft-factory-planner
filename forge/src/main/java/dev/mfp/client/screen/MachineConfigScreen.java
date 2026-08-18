@@ -18,8 +18,10 @@ import dev.mfp.core.behaviour.ThroughputResult;
 import dev.mfp.core.model.MfpMachine;
 import dev.mfp.core.model.MfpRecipe;
 import dev.mfp.core.plan.MachineConfig;
+import dev.mfp.core.plan.MachineDefaults;
 import dev.mfp.core.plan.Plan;
 import dev.mfp.core.select.MachinePicker;
+import dev.mfp.plan.PreferenceStore;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
@@ -82,6 +84,31 @@ public final class MachineConfigScreen extends ModalScreen {
         int columnWidth = (contentWidth() - GAP) / 2;
         buildMachineList(contentX(), contentY(), columnWidth);
         buildSettings(contentX() + columnWidth + GAP, contentY(), columnWidth);
+
+        // A build described once, promoted to every line that runs the machine. The per-line dialog
+        // is where the player already has the numbers in front of them, so making them retype the
+        // same coils on the Machines screen would be the same work twice.
+        MfpMachine machine = config.machineId() == null ? null : ClientIndex.get().machine(config.machineId());
+        TextButton adopt = new TextButton("Use for every " + (machine == null
+                ? "machine" : shortName(machine.displayName())), () -> {
+            if (machine == null) {
+                return;
+            }
+            PreferenceStore.get().machineDefaults(machine.id(),
+                    new MachineDefaults(machine.multiblock() ? config.tier() : MachineDefaults.UNSET_TIER,
+                            config.parallels() > 1 ? config.parallels() : MachineDefaults.UNSET_PARALLELS,
+                            config.structureOptions()));
+            PreferenceStore.save();
+            ClientPlanner.refresh();
+            rebuild();
+        });
+        adopt.enabled(machine != null);
+        adopt.tooltip("Take this build - the hatch, the parallels and everything you set below the "
+                + "machine - as how your copy of this machine is built, for every plan. The machine "
+                + "limit is not included: how many you own is a fact about one factory.");
+        adopt.bounds(contentX() + contentWidth() - 6 - adopt.preferredWidth() - 60,
+                panelY + panelHeight - FOOTER_HEIGHT + 3, adopt.preferredWidth(), 14);
+        widgets.add(adopt);
 
         TextButton reset = new TextButton("Use the default", () -> {
             // Forgetting the configuration is not the same as writing the default into it: the
@@ -158,7 +185,15 @@ public final class MachineConfigScreen extends ModalScreen {
 
     private void chooseMachine(MfpMachine machine) {
         int tier = machine.tier() >= 0 ? machine.tier() : Math.max(0, recipe.minTier());
-        apply(config.withMachine(machine.id(), tier));
+        MachineDefaults build = PreferenceStore.get().machineDefaults(machine.id());
+        // Seeded from the player's own description of that machine, where they have one. Switching
+        // to a machine they have already described and being shown numbers for an empty one would
+        // make the standing build look like it had not taken.
+        MachineConfig picked = config.withMachine(machine.id(), tier);
+        if (build.hasTier() && machine.tier() < 0 && tier < build.tier()) {
+            picked = picked.withTier(build.tier());
+        }
+        apply(build.applyTo(picked));
         // Also the policy for this recipe type, so a later expansion's new line of the same type
         // starts where the user put this one (plan §8.2). The build itself stays per recipe.
         plan.chooseMachine(recipe.recipeTypeId(), machine.id());
@@ -417,6 +452,11 @@ public final class MachineConfigScreen extends ModalScreen {
             offer(machines.headerTooltip(contentX(), contentY(), columnWidth - 6, mouseX, mouseY),
                     mouseX, mouseY);
         }
+    }
+
+    /** The machine's name, short enough to sit inside a button. */
+    private static String shortName(String displayName) {
+        return displayName.length() <= 18 ? displayName : displayName.substring(0, 17) + "…";
     }
 
     private static int parseInt(String text, int fallback) {

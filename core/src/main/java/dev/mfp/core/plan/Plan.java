@@ -518,6 +518,9 @@ public final class Plan {
         }
         if (machineConfigs.containsKey(line.recipe().id())) {
             decisions.add(LineDecision.CONFIG);
+        } else if (preferences != null && line.machine().machineId() != null
+                && !preferences.machineDefaults(line.machine().machineId()).isEmpty()) {
+            decisions.add(LineDecision.STANDING_BUILD);
         }
         return decisions;
     }
