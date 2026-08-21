@@ -334,6 +334,67 @@ class PreferencesTest {
                 () -> "the import must name the blacklisted cause: " + result.importReasons());
     }
 
+    // ------------------------------------------ M14, the picker knows what the walk knows
+
+    /**
+     * The fault the milestone is named after, in the shape the pack has it.
+     *
+     * <p>The walk finds this by failing: a round cannot make air essence, the next round runs
+     * knowing air essence is gone, and by the third the whole essence route to a log has gone with
+     * it. The picker ranks one key and never fails at anything, so it saw a one-input, guaranteed,
+     * low-tier recipe and put it first - and the user who clicked it arrived two clicks later at an
+     * item with no ways to make it at all. Being right eventually is not the same as being right
+     * where the pick is made.
+     */
+    @Test
+    @DisplayName("the picker will not offer a route the blacklist killed three items further up")
+    void thePickerRefusesWhatTheWalkWouldHaveRoutedAround() {
+        RecipeIndex index = essenceChainAndAGreenhouse();
+        Plan plan = new Plan("logs").target(OAK, 1).rawMaterial(ORE).rawMaterial(SPRUCE);
+        RecipeChooser chooser = new RecipeChooser(index, Preferences.none().blockItem(ESSENCE));
+
+        List<String> offered = chooser.alternatives(OAK, plan).stream()
+                .map(scored -> scored.recipe().id()).toList();
+
+        assertEquals(List.of("mfp:greenhouse"), offered,
+                "the essence burner is not an answer, and the greenhouse still is - its own inputs "
+                        + "have no recipes at all, which is a thing you buy rather than a thing the "
+                        + "blacklist took");
+
+        String reason = chooser.excludedAlternatives(OAK, plan).get(index.recipe("mfp:burn_essence"));
+        assertNotNull(reason, "an excluded recipe must still be obtainable, with a reason");
+        // Both halves, because the user can only act on one of them: the recipe wanted wood essence,
+        // and the decision that took wood essence away was blocking inferium.
+        assertTrue(reason.contains(DUST.toString()) && reason.contains(ESSENCE.toString()), reason);
+    }
+
+    /**
+     * And the same knowledge where a plan built by hand needs it, which is its very first line.
+     *
+     * <p>Hand-built expansion resolves the target and stops (§12.3), so the blacklist's consequences
+     * were never discovered at all - there was no second round to discover them in. The target's own
+     * recipe was the essence burner while the automatic plan for the same item was building a
+     * greenhouse, which is the two paths disagreeing about the one line the mode exists to let the
+     * user choose.
+     */
+    @Test
+    @DisplayName("a plan built by hand starts from the same recipe the automatic one does")
+    void handBuiltAgreesWithTheWalkOnTheFirstLine() {
+        RecipeIndex index = essenceChainAndAGreenhouse();
+        Preferences preferences = Preferences.none().blockItem(ESSENCE);
+
+        Plan automatic = new Plan("auto").target(OAK, 1).rawMaterial(ORE).rawMaterial(SPRUCE);
+        new RecipeChooser(index, preferences).expandInto(automatic);
+
+        Plan byHand = new Plan("by hand").target(OAK, 1).rawMaterial(ORE).rawMaterial(SPRUCE)
+                .autoResolve(false);
+        new RecipeChooser(index, preferences).expandInto(byHand);
+
+        assertEquals("mfp:greenhouse", recipeFor(automatic, OAK));
+        assertEquals(recipeFor(automatic, OAK), recipeFor(byHand, OAK),
+                "one walk or none, the target's recipe is chosen knowing the same things");
+    }
+
     @Test
     @DisplayName("a plan may allow an item the standing preferences block")
     void planCanAllowABlockedItem() {

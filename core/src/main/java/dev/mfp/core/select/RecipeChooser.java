@@ -125,9 +125,26 @@ public final class RecipeChooser {
      */
     private static final int FED_CYCLE_SUPPLIER_LIMIT = 256;
 
+    /**
+     * How many items the blacklist's consequences may reach before the search stops (M14).
+     *
+     * <p>A ceiling rather than a budget: the search only ever looks at consumers of something it
+     * has already lost, so on a real blacklist it settles in two or three rounds over a handful of
+     * items. The cap is there so that blocking water - which every third recipe in the pack drinks -
+     * cannot turn opening a picker into a scan of the index.
+     */
+    private static final int BLACKLIST_REACH_LIMIT = 4096;
+
     /** Answers to {@link #wouldCloseAFedCycle}, which is asked once per candidate per pick. */
     private final Map<String, Boolean> fedCycleCache = new LinkedHashMap<>();
     private final Map<String, Integer> buildCostCache = new LinkedHashMap<>();
+
+    /** @see #blacklistConsequences */
+    private Map<MfpKey, MfpKey> consequences = Map.of();
+
+    /** The blacklist those consequences were worked out from, so a changed one is noticed. */
+    private String consequencesFor;
+
     private Set<MfpKey> producedIgnoringVariant;
 
     /**
@@ -1607,8 +1624,20 @@ public final class RecipeChooser {
      * </ul>
      */
     private ChooserResult expandAvoiding(Plan plan, Set<String> extraBlacklist) {
-        Map<MfpKey, MfpKey> unreachable = new LinkedHashMap<>();
+        // The consequences are worked out from the index before the first walk rather than only
+        // discovered by it (M14). The walk discovers them where it goes, and a plan built by hand
+        // does not go anywhere: it resolves the target and stops, so the essence route to oak logs
+        // was still the target's own line long after the automatic plan had routed around it. The
+        // rounds below are kept, because a walk can still meet something this search bounded away.
+        Map<MfpKey, MfpKey> unreachable = new LinkedHashMap<>(blacklistConsequences(plan));
         Attempt attempt = expandOnce(plan, extraBlacklist, unreachable);
+        if (!unreachable.isEmpty() && !stillMakesTargets(plan, attempt.result())) {
+            // Never give up a plan to keep the rule - the same clause the rounds below observe.
+            // Where the blacklist leaves no route at all, the honest answer is the plan with its
+            // imports and their reasons, not an empty one.
+            unreachable = new LinkedHashMap<>();
+            attempt = expandOnce(plan, extraBlacklist, unreachable);
+        }
         for (int round = 0; round < MAX_BLOCK_ROUNDS && !attempt.blockedKeys().isEmpty(); round++) {
             Map<MfpKey, MfpKey> next = new LinkedHashMap<>(unreachable);
             next.putAll(attempt.blockedKeys());
@@ -1663,7 +1692,8 @@ public final class RecipeChooser {
         scoringPlan(plan);
         Set<MfpKey> produced = plan == null ? Set.of() : producedBy(plan);
         Set<MfpKey> preferred = preferences.preferredItemsFor(plan);
-        List<RecipeScorer.Scored> ranked = RecipeScorer.rank(key, usable(key, plan), produced, oracle);
+        List<RecipeScorer.Scored> ranked = RecipeScorer.rank(
+                key, usable(key, plan, Set.of(), blacklistConsequences(plan)), produced, oracle);
         if (preferred.isEmpty()) {
             return ranked;
         }
@@ -1710,9 +1740,12 @@ public final class RecipeChooser {
                 excluded.put(recipe, "never actually yields " + key);
                 continue;
             }
-            MfpKey offender = blockedInput(recipe, plan);
+            Unavailable offender = unavailableInput(recipe, plan, blacklistConsequences(plan));
             if (offender != null) {
-                excluded.put(recipe, "needs " + offender + ", which is blacklisted");
+                excluded.put(recipe, offender.input().equals(offender.cause())
+                        ? "needs " + offender.input() + ", which is blacklisted"
+                        : "needs " + offender.input() + ", and every way to make that needs "
+                                + offender.cause() + ", which is blacklisted");
             }
         }
         return excluded;
@@ -1720,8 +1753,9 @@ public final class RecipeChooser {
 
     public Map<MfpRecipe, MfpKey> blockedAlternatives(MfpKey key, Plan plan) {
         Map<MfpRecipe, MfpKey> blocked = new LinkedHashMap<>();
+        Map<MfpKey, MfpKey> lost = blacklistConsequences(plan);
         for (MfpRecipe recipe : index.producing(key)) {
-            MfpKey offender = blockedInput(recipe, plan);
+            MfpKey offender = blockedInput(recipe, plan, lost);
             if (offender != null) {
                 blocked.put(recipe, offender);
             }
@@ -1745,20 +1779,36 @@ public final class RecipeChooser {
      *                    item each of them ultimately blames
      */
     private MfpKey blockedInput(MfpRecipe recipe, Plan plan, Map<MfpKey, MfpKey> unreachable) {
+        Unavailable found = unavailableInput(recipe, plan, unreachable);
+        return found == null ? null : found.cause();
+    }
+
+    /**
+     * An ingredient the plan cannot have, and the blacklisted item to blame for it.
+     *
+     * <p>The two are the same thing until the blacklist's consequences are followed (M14): with
+     * inferium blocked, the ingredient is wood essence and the item to blame is still inferium.
+     * Both are worth saying - one is what the recipe wanted, the other is the decision that took it
+     * away and the only one the user can take back.
+     */
+    private record Unavailable(MfpKey input, MfpKey cause) {}
+
+    private Unavailable unavailableInput(MfpRecipe recipe, Plan plan,
+                                         Map<MfpKey, MfpKey> unreachable) {
         for (MfpIngredient input : recipe.inputs()) {
             if (!input.consumed() || input.effectiveAmount() <= 0) {
                 // A catalyst is a thing you own rather than a thing you consume, and the statement
                 // being made here is "I have no supply of this", not "I do not have one".
                 continue;
             }
-            MfpKey blocked = null;
+            Unavailable blocked = null;
             for (MfpKey candidate : input.candidates()) {
                 MfpKey cause = causeOfUnavailability(candidate, plan, unreachable);
                 if (cause == null) {
                     blocked = null;
                     break;
                 }
-                blocked = cause;
+                blocked = new Unavailable(candidate, cause);
             }
             if (blocked != null) {
                 return blocked;
@@ -1773,6 +1823,126 @@ public final class RecipeChooser {
             return key;
         }
         return unreachable.get(key);
+    }
+
+    /**
+     * Every item this plan's blacklist leaves unmakeable, and the blacklisted item each one blames.
+     *
+     * <p><b>The picker's half of the fixpoint (M14).</b> An expansion discovers this by walking:
+     * a round that finds no route to an item marks it unavailable in its own right, the next round
+     * runs knowing it, and blocking inferium essence eventually takes the whole essence route to
+     * oak logs off the table ({@link #expandAvoiding}). The picker has no walk. It ranks one key,
+     * so it saw {@code start:essence_burning/wood_essence_burning_0} - one input, guaranteed
+     * output, tier 1 - score 55 and put it first, while the automatic plan for the same item was
+     * building a greenhouse. Clicking it led two clicks further to an item with <em>no</em> ways to
+     * make it at all, which is the walk's knowledge arriving too late to be any use.
+     *
+     * <p>Same question, asked without a plan to walk. Blocking an item can only cost the plan
+     * things made <em>from</em> it, so the search starts at the blocked items and moves outwards
+     * through consumers: an item every one of whose recipes now needs something lost is lost too,
+     * and it is the next round's frontier. That is {@link #expandAvoiding}'s rule with the walk
+     * taken out, so the two cannot disagree about what the blacklist costs - and the same
+     * {@link #MAX_BLOCK_ROUNDS} bounds the chain either of them will follow.
+     *
+     * <p>Computed once per blacklist and cached, because the recipe picker re-ranks on every
+     * keystroke in its search box and this must not be something a keystroke pays for. The cache
+     * key is the blacklist itself rather than the plan, so it survives every edit that cannot
+     * change the answer - which is nearly all of them.
+     *
+     * <p>Two things it deliberately does not claim, both of them the walk's own rules:
+     *
+     * <ul>
+     *   <li><b>An item nothing produces is not lost, it is bought.</b> Raw ore has no recipe and
+     *       that is not the blacklist's doing. Only an item the pack can actually make, and now
+     *       cannot, propagates.
+     *   <li><b>A recipe the user hid is not a recipe the blacklist took.</b> Hidden recipes are
+     *       passed over here without ever becoming a reason, so "you hid it" and "you have none of
+     *       these" stay separate answers, as {@link #recordWhyNothingWorks} keeps them separate.
+     * </ul>
+     */
+    private Map<MfpKey, MfpKey> blacklistConsequences(Plan plan) {
+        Set<MfpKey> blocked = blockedItems(plan);
+        String signature = blocked.toString() + (plan == null ? "" : plan.blacklist().toString()
+                + plan.rawMaterials().toString());
+        if (signature.equals(consequencesFor)) {
+            return consequences;
+        }
+        Map<MfpKey, MfpKey> lost = new LinkedHashMap<>();
+        Set<MfpKey> frontier = blocked;
+        for (int round = 0; round < MAX_BLOCK_ROUNDS && !frontier.isEmpty(); round++) {
+            Map<MfpKey, MfpKey> next = new LinkedHashMap<>();
+            for (MfpKey gone : frontier) {
+                for (MfpRecipe consumer : index.consuming(gone)) {
+                    for (MfpOutput output : consumer.outputs()) {
+                        MfpKey key = output.key();
+                        if (key.isPseudo() || lost.containsKey(key) || next.containsKey(key)
+                                || blocked.contains(key)) {
+                            continue;
+                        }
+                        MfpKey cause = everyRouteBlocked(key, plan, lost);
+                        if (cause != null) {
+                            next.put(key, cause);
+                        }
+                    }
+                }
+            }
+            if (next.isEmpty() || lost.size() + next.size() > BLACKLIST_REACH_LIMIT) {
+                break;
+            }
+            lost.putAll(next);
+            frontier = next.keySet();
+        }
+        consequences = Map.copyOf(lost);
+        consequencesFor = signature;
+        return consequences;
+    }
+
+    /** The items this plan may not use at all, standing preference and per-plan override together. */
+    private Set<MfpKey> blockedItems(Plan plan) {
+        Set<MfpKey> blocked = new LinkedHashSet<>();
+        preferences.blockedItems().forEach(key -> {
+            if (preferences.blocks(plan, key)) {
+                blocked.add(key);
+            }
+        });
+        if (plan != null) {
+            plan.blockedItems().forEach(key -> {
+                if (preferences.blocks(plan, key)) {
+                    blocked.add(key);
+                }
+            });
+        }
+        return blocked;
+    }
+
+    /**
+     * The blacklisted item to blame when nothing left can make {@code key}, or null if something can.
+     *
+     * <p>"Or null if something can" is doing the work: one usable recipe is enough, and it is
+     * enough however many others are blocked, which is why this returns on the first one it finds
+     * rather than counting.
+     */
+    private MfpKey everyRouteBlocked(MfpKey key, Plan plan, Map<MfpKey, MfpKey> lost) {
+        if (plan != null && plan.rawMaterials().contains(key)) {
+            return null;
+        }
+        List<MfpRecipe> producers = index.producing(key);
+        if (producers.isEmpty()) {
+            return null;
+        }
+        MfpKey cause = null;
+        for (MfpRecipe producer : producers) {
+            if (isDeadEnd(producer, key)
+                    || (plan != null && plan.blacklist().contains(producer.id()))) {
+                continue;
+            }
+            MfpKey blocked = blockedInput(producer, plan, lost);
+            if (blocked == null) {
+                return null;
+            }
+            cause = lost.getOrDefault(blocked, blocked);
+        }
+        return cause;
     }
 
     private List<MfpRecipe> usable(MfpKey key, Plan plan) {
