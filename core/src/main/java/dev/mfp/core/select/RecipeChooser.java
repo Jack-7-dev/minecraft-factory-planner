@@ -115,6 +115,18 @@ public final class RecipeChooser {
     private final RecipeIndex index;
     private final Preferences preferences;
     private final Map<MfpKey, Set<MfpKey>> downstreamCache = new LinkedHashMap<>();
+
+    /**
+     * How many ways of making an input to look at before giving up on finding a loop.
+     *
+     * <p>The same bound and the same reason as {@link #DOWNSTREAM_CONSUMER_LIMIT}: water has
+     * thousands of producers in this pack, and a loop that only shows up on the two thousandth of
+     * them is not one the scorer should be spending a plan's time hunting for.
+     */
+    private static final int FED_CYCLE_SUPPLIER_LIMIT = 256;
+
+    /** Answers to {@link #wouldCloseAFedCycle}, which is asked once per candidate per pick. */
+    private final Map<String, Boolean> fedCycleCache = new LinkedHashMap<>();
     private final Map<String, Integer> buildCostCache = new LinkedHashMap<>();
     private Set<MfpKey> producedIgnoringVariant;
 
@@ -158,6 +170,17 @@ public final class RecipeChooser {
     private boolean rateDecidedAPick;
 
     /**
+     * Whether this walk is being run with the scorer's loop terms back in full force (M13 item 5).
+     *
+     * <p>Not a setting, and the twin of {@link #rateBlind}: both halves of one comparison. See
+     * {@link #theBetterOfTheLoopDecision}.
+     */
+    private boolean loopBlind;
+
+    /** Whether a withheld loop penalty could have decided a pick during this expansion. */
+    private boolean loopDecidedAPick;
+
+    /**
      * Items this walk may not answer with a particular recipe, and which one (M13 item 1).
      *
      * <p>Not a blacklist: the recipe stays on the plan and keeps supplying everything else it makes.
@@ -190,6 +213,17 @@ public final class RecipeChooser {
 
     private ThroughputResolver resolver = ThroughputResolver.BASE;
 
+    /**
+     * The expansion currently running, or null between walks (M13 item 5).
+     *
+     * <p>Held here because the scorer's oracle is one object shared by every walk, and the one
+     * question item 5 adds - would this pick close a loop, and does anything feed it - can only be
+     * answered by the walk that is part-way through building the plan. Nobody outside {@link
+     * #expandOnce} sets it, and a caller with no walk in progress (the picker, a test) gets the
+     * behaviour that stood before the item.
+     */
+    private Expansion active;
+
     /** Answers the scorer's index-dependent questions, sharing this chooser's caches. */
     private final RecipeScorer.Oracle oracle = new RecipeScorer.Oracle() {
 
@@ -221,6 +255,13 @@ public final class RecipeChooser {
         @Override
         public boolean isSpareByproduct(MfpKey key) {
             return spareByproducts.contains(key);
+        }
+
+        @Override
+        public boolean closesAFedCycle(MfpRecipe recipe, MfpKey producedKey) {
+            return !loopBlind
+                    && ((active != null && active.closesAFedCycle(recipe, producedKey))
+                            || wouldCloseAFedCycle(recipe, producedKey));
         }
 
         @Override
@@ -427,6 +468,95 @@ public final class RecipeChooser {
     }
 
     /**
+     * Whether choosing this recipe would <em>make</em> a fed loop available (M13 item 5).
+     *
+     * <p>The other half of the same question, for the place the walk has no path to ask it of: the
+     * pick at the top of the plan. Nothing has been chosen yet when the first target is resolved,
+     * so there is no cycle to look at and both loop terms fire on shape alone - which is why the
+     * pack's tree loop was never found unless the greenhouse was pinned. The greenhouse that eats
+     * carbon dioxide scored <b>-34.3</b> against the one that only drinks water at <b>7.7</b>, and
+     * the difference is very nearly the reversibility penalty the loop was charged for being a loop.
+     *
+     * <p>What is asked of the index is deliberately narrow. A recipe invites a loop when something
+     * that could supply one of its inputs consumes <em>a different output of its own</em> - the
+     * greenhouse gives off oxygen, and burning charcoal in oxygen is how the pack makes the carbon
+     * dioxide it drinks. That "different" is the whole of the safety: nine nuggets make an ingot,
+     * and the recipe that supplies the nuggets consumes the ingot itself, which is the packaging
+     * pair the penalty exists for and is excluded here by construction. And the pair still has to
+     * be fed from outside, on the same reasoning as the path case.
+     *
+     * <p>It is speculative where the path case is factual - the walk may go on to pick some other
+     * producer - and that is why it only ever <em>withholds</em> a penalty rather than awarding a
+     * bonus. Being wrong costs the plan nothing beyond having judged one loop-shaped recipe on its
+     * other merits.
+     */
+    private boolean wouldCloseAFedCycle(MfpRecipe recipe, MfpKey producedKey) {
+        String cacheKey = recipe.id() + "\u0000" + producedKey;
+        Boolean cached = fedCycleCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+        boolean answer = false;
+        outer:
+        for (MfpIngredient input : recipe.inputs()) {
+            if (!input.consumed() || input.effectiveAmount() <= 0) {
+                continue;
+            }
+            MfpKey wanted = input.primary();
+            if (wanted.isPseudo()) {
+                continue;
+            }
+            int scanned = 0;
+            for (MfpRecipe supplier : index.producing(wanted)) {
+                if (scanned++ >= FED_CYCLE_SUPPLIER_LIMIT) {
+                    break;
+                }
+                for (MfpOutput output : recipe.outputs()) {
+                    if (output.key().equals(producedKey) || output.isChanced()) {
+                        // The produced key is excluded because a supplier consuming *that* is the
+                        // packaging pair itself. A chanced output is excluded because a loop the
+                        // factory only closes one time in twenty is not a loop it can run on.
+                        continue;
+                    }
+                    if (supplier.consumes(output.key())
+                            && fedFromOutside(List.of(recipe, supplier))) {
+                        answer = true;
+                        break outer;
+                    }
+                }
+            }
+        }
+        fedCycleCache.put(cacheKey, answer);
+        return answer;
+    }
+
+    /** Whether any member of {@code cycle} consumes something no member of it produces. */
+    private static boolean fedFromOutside(List<MfpRecipe> cycle) {
+        for (MfpRecipe member : cycle) {
+            for (MfpIngredient input : member.inputs()) {
+                if (!input.consumed() || input.effectiveAmount() <= 0) {
+                    continue;
+                }
+                MfpKey key = input.primary();
+                if (key.isPseudo()) {
+                    // Energy and computation are how the plan accounts for machines running, not
+                    // material entering the loop. Counting them would make every cycle in a
+                    // GregTech pack fed, which is to say it would delete the question.
+                    continue;
+                }
+                boolean inside = false;
+                for (MfpRecipe other : cycle) {
+                    inside |= other.produces(key);
+                }
+                if (!inside) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Everything reachable by consuming {@code key} and then consuming what that produced.
      *
      * <p>Computed once per item and cached, rather than per candidate: an item with four hundred
@@ -552,6 +682,9 @@ public final class RecipeChooser {
                 return expandAvoiding(plan, Set.of());
             }
             ChooserResult best = expandSteeringAroundPackagingLoops(plan);
+            if (loopDecidedAPick) {
+                best = theBetterOfTheLoopDecision(plan, best);
+            }
             if (rateDecidedAPick) {
                 best = cheaperOfTheRateDecision(plan, best);
             }
@@ -563,8 +696,53 @@ public final class RecipeChooser {
             spareByproducts = Set.of();
             rateBlind = false;
             rateDecidedAPick = false;
+            loopBlind = false;
+            loopDecidedAPick = false;
             dedicatedFor = Map.of();
         }
+    }
+
+    /**
+     * Expand a second time with the loop penalties back in force, and keep the better plan.
+     *
+     * <p>Item 5 lets the scorer withhold its two loop penalties from a recipe whose loop something
+     * feeds, and measured on its own that is not safe. It finds the pack's tree loop - the oak plan
+     * goes from one greenhouse drinking water at 4500 EU/s to a six-line loop at 1168 - and on the
+     * polyvinyl butyral chain it walks into a web of chemistry loops the engine can only balance by
+     * relaxing two intermediates into imports, which is §16.7's fault in a new place: <b>not making
+     * something is always cheap.</b>
+     *
+     * <p>So the relaxation does not decide anything. It <em>proposes</em> a plan, the plan the
+     * penalties would have built is walked as well, and the two are compared the way every other
+     * pass in this milestone compares them - by the same guard that caught the same fault in the
+     * feeding round. A loop plan is kept only when it neither costs more energy nor starts buying
+     * something it has a line for, and is then strictly better on imports, energy or size. A tie
+     * keeps the plan the penalties built, because that is the one in hand.
+     *
+     * <p>Only run when a withheld penalty could have decided a pick, and "could have" is measured
+     * rather than assumed: the winner has to carry one of the markers <em>and</em> have a runner-up
+     * within the largest penalty either term withholds. A winner sixty points clear would have won
+     * anyway, and walking the graph again to be told so is a second's work for nothing.
+     */
+    private ChooserResult theBetterOfTheLoopDecision(Plan plan, ChooserResult loopAware) {
+        loopBlind = true;
+        ChooserResult blind;
+        try {
+            blind = expandSteeringAroundPackagingLoops(plan);
+        } finally {
+            loopBlind = false;
+        }
+        if (blind.lines().isEmpty() || !stillMakesTargets(plan, blind)) {
+            return loopAware;
+        }
+        if (!costsMore(plan, blind, loopAware) && rank(plan, loopAware, blind) < 0) {
+            return loopAware;
+        }
+        // Kept for the rounds that follow, exactly as the rate comparison keeps its own: a feeding
+        // round re-walks the whole plan, and re-walking it under the setting that just lost would
+        // quietly rebuild the plan this comparison threw out.
+        loopBlind = true;
+        return blind;
     }
 
     /**
@@ -1449,8 +1627,14 @@ public final class RecipeChooser {
 
     private Attempt expandOnce(Plan plan, Set<String> extraBlacklist, Map<MfpKey, MfpKey> unreachable) {
         Expansion expansion = new Expansion(plan, extraBlacklist, unreachable);
-        for (TargetOutput target : plan.targets()) {
-            expansion.resolve(target.key(), 0);
+        Expansion outer = active;
+        active = expansion;
+        try {
+            for (TargetOutput target : plan.targets()) {
+                expansion.resolve(target.key(), 0);
+            }
+        } finally {
+            active = outer;
         }
         return expansion.finish();
     }
@@ -1806,6 +1990,56 @@ public final class RecipeChooser {
         }
 
         /**
+         * Whether picking {@code candidate} would close a loop that something feeds (M13 item 5).
+         *
+         * <p>The scorer's two loop terms fire on the shape of a cycle without ever having one; this
+         * is where the cycle actually exists. If one of the candidate's inputs is made by an
+         * ancestor on the current path, then choosing it does not start a chain - {@link
+         * #ancestorProducing} will close the loop the moment the walk reaches that input - and the
+         * loop is exactly the run of the path from that ancestor inwards, plus the candidate.
+         *
+         * <p>What separates a productive loop from a unit conversion is whether anything enters it.
+         * Nine nuggets make an ingot and an ingot makes nine nuggets: every input of the pair comes
+         * out of the pair, so the loop carries no material and produces none, and it is the shape
+         * both penalties were written for. The pack's tree loop takes water at one end and charcoal
+         * at the other and hands back logs; it is fed, and following it round is how the factory
+         * runs. So the question asked of the cycle is the one that tells them apart.
+         *
+         * <p>Nearest ancestor only, because that is the loop that would be closed. A more distant
+         * one would be a different and larger cycle, and the walk closes the tightest.
+         */
+        private boolean closesAFedCycle(MfpRecipe candidate, MfpKey producedKey) {
+            MfpRecipe ancestor = null;
+            for (MfpIngredient input : candidate.inputs()) {
+                if (!input.consumed() || input.effectiveAmount() <= 0) {
+                    continue;
+                }
+                ancestor = ancestorProducing(chosenCandidate(input));
+                if (ancestor != null) {
+                    break;
+                }
+            }
+            if (ancestor == null || ancestor.produces(producedKey)) {
+                // No loop to close; or the ancestor already makes the very thing being asked for,
+                // which is not a loop either - it is the sibling case, and it has its own rule.
+                return false;
+            }
+
+            List<MfpRecipe> cycle = new ArrayList<>();
+            cycle.add(candidate);
+            for (String id : path) {            // innermost first, down to the ancestor inclusive
+                MfpRecipe onPath = nodes.get(id);
+                if (onPath != null) {
+                    cycle.add(onPath);
+                }
+                if (id.equals(ancestor.id())) {
+                    break;
+                }
+            }
+            return RecipeChooser.fedFromOutside(cycle);
+        }
+
+        /**
          * A line already in this plan that makes {@code key} too, in a byproduct-feeding round.
          *
          * <p>This is the sibling half of {@link #ancestorProducing}, and the pack is what argued for
@@ -1920,10 +2154,15 @@ public final class RecipeChooser {
                 recordWhyNothingWorks(key);
                 return null;
             }
+            boolean closeRunnerUp = ranked.size() > 1
+                    && ranked.get(0).score() - ranked.get(1).score() < RecipeScorer.MAX_LOOP_PENALTY;
             for (String reason : ranked.get(0).reasons()) {
                 if (reason.startsWith(RecipeScorer.RATE_DECIDED)) {
                     rateDecidedAPick = true;
-                    break;
+                }
+                if (closeRunnerUp && (reason.equals(RecipeScorer.LOOP_IS_FED)
+                        || reason.equals(RecipeScorer.CLOSES_A_FED_LOOP))) {
+                    loopDecidedAPick = true;
                 }
             }
             return ranked.get(0).recipe();

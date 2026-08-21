@@ -896,6 +896,87 @@ class RecipeChooserTest {
                 recipe("mfp:biomass", BEETROOT, 1, BIOMASS, 1));
     }
 
+    // ------------------------------------------------------------ M13 item 5, loops at scoring time
+
+    /**
+     * Two ways to grow a log, one of which drinks a gas its own byproduct can make.
+     *
+     * <p>The pack's shape in four recipes. {@code grow_co2} looks like a reversal on the structural
+     * test - carbon dioxide can be made from a log, by charring it and burning the charcoal - and
+     * the -60 that follows is what kept the loop off every plan that did not pin it. The plain
+     * greenhouse is deliberately only <em>one point</em> better on the terms the scorer can see, so
+     * the fixture is about the loop terms and nothing else.
+     *
+     * @param burnCost what the loop's own carbon dioxide costs to make, which is what the second
+     *                 walk is for
+     */
+    private static RecipeIndex fedLoopIndex(int burnCost) {
+        return indexOf(
+                MfpRecipe.builder("mfp:grow_plain", "mfp:machine", "test")
+                        .input(MfpIngredient.of(ORE, 1))
+                        .input(MfpIngredient.of(SALT, 1))
+                        .output(MfpOutput.of(LOG, 1))
+                        .duration(20).euIn(512).minTier(1).build(),
+                MfpRecipe.builder("mfp:grow_co2", "mfp:machine", "test")
+                        .input(MfpIngredient.of(CARBON_DIOXIDE, 1))
+                        .output(MfpOutput.of(LOG, 1))
+                        .output(MfpOutput.of(OXYGEN, 1))
+                        .duration(20).euIn(16).minTier(1).build(),
+                MfpRecipe.builder("mfp:burn_charcoal", "mfp:machine", "test")
+                        .input(MfpIngredient.of(CHARCOAL, 1))
+                        .input(MfpIngredient.of(OXYGEN, 1))
+                        .output(MfpOutput.of(CARBON_DIOXIDE, 1))
+                        .duration(20).euIn(burnCost).minTier(1).build(),
+                // Four charcoal from a log, so the loop is not exactly self-consuming: one log in
+                // four goes back into the fire and three leave the plan.
+                recipe("mfp:char", LOG, 1, CHARCOAL, 4));
+    }
+
+    /**
+     * The milestone's last acceptance: the loop is found by the <em>first</em> walk.
+     *
+     * <p>Byproduct feeding is switched off, so nothing here is the feeding pass talking the plan
+     * back into a loop it steered away from. The walk picks the looping greenhouse itself, because
+     * the recipe that could supply its carbon dioxide eats the oxygen it gives off - which is a
+     * loop something feeds rather than a packaging pair, and the scorer can now tell the two apart.
+     */
+    @Test
+    @DisplayName("the first walk takes a loop something feeds, with no feeding round to talk it back")
+    void theFirstWalkFindsAFedLoop() {
+        Plan plan = new Plan("loop").target(LOG, 1).byproductFeeds(false);
+        ChooserResult result = new RecipeChooser(fedLoopIndex(16)).expand(plan);
+
+        assertTrue(ids(result).contains("mfp:grow_co2"),
+                () -> "the looping greenhouse is the pick: " + ids(result));
+        assertTrue(ids(result).contains("mfp:burn_charcoal"),
+                () -> "and the loop is closed by the plan's own charcoal: " + ids(result));
+        assertFalse(ids(result).contains("mfp:grow_plain"),
+                () -> "the plain greenhouse is not needed at all: " + ids(result));
+        assertTrue(result.requiresMatrixSolver(), "the loop is left for the whole-plan engine");
+    }
+
+    /**
+     * And the relaxation decides nothing on its own.
+     *
+     * <p>Same fixture with the loop's carbon dioxide made expensive. The scorer still withholds the
+     * penalty and the walk still proposes the loop; the second walk builds the plan the penalty
+     * would have built, the two are costed, and the loop loses. This is the guard that matters:
+     * measured without it, the relaxation took the pack's polyvinyl butyral chain from 65 working
+     * lines to a plan importing two intermediates it had a whole chemistry tree for, because not
+     * making something is always cheap.
+     */
+    @Test
+    @DisplayName("a loop the plan cannot afford is refused, and the penalty stands")
+    void aFedLoopThatCostsMoreIsRefused() {
+        Plan plan = new Plan("loop").target(LOG, 1).byproductFeeds(false);
+        ChooserResult result = new RecipeChooser(fedLoopIndex(100_000)).expand(plan);
+
+        assertTrue(ids(result).contains("mfp:grow_plain"),
+                () -> "the plan the loop terms built is kept: " + ids(result));
+        assertFalse(ids(result).contains("mfp:burn_charcoal"),
+                () -> "and the loop is not in it: " + ids(result));
+    }
+
     // ------------------------------------------------------------ M11.2 and M11.3, hand-building
 
     private static final MfpKey GAS = MfpKey.fluid("mfp", "gas");

@@ -199,6 +199,33 @@ public final class RecipeScorer {
             return false;
         }
 
+        /**
+         * Whether choosing this recipe would close a loop that something feeds (M13 item 5).
+         *
+         * <p>The question the other two loop terms have been answering by assumption. Consuming
+         * something the plan already makes is cycle risk, and a recipe whose input can be made from
+         * its own output is a reversal - but both of those are statements about a <em>cycle</em>,
+         * and neither of them has ever seen one. They fire on the shape a cycle would have, which
+         * is why the pack's own tree loop scored like a nugget-to-ingot conversion: the greenhouse
+         * turns carbon dioxide into oxygen, so every recipe making carbon dioxide out of oxygen
+         * looks like its reverse.
+         *
+         * <p>The two are different in one respect that can be checked. A unit conversion is
+         * <em>closed</em> - nine nuggets make an ingot and an ingot makes nine nuggets, and nothing
+         * enters the pair from anywhere else, so following it round consumes nothing and yields
+         * nothing. A productive loop is <em>fed</em>: the greenhouse takes water and the carbon
+         * dioxide line takes charcoal, and the loop exists to carry the oxygen between them while
+         * the logs come out. So the test is not "is there a cycle" but "does the cycle eat anything
+         * from outside itself", and a caller that has the walk's current path can answer it.
+         *
+         * <p>Answered from the path rather than from the index, which is the whole of item 5's
+         * ordering problem: the cycle a pick would create is only knowable where the pick is being
+         * made. A caller with no walk in progress answers no, and both penalties stand as before.
+         */
+        default boolean closesAFedCycle(MfpRecipe recipe, MfpKey producedKey) {
+            return false;
+        }
+
         /** What form an item is, or null when the game says nothing about it. */
         default MaterialForm form(MfpKey key) {
             return null;
@@ -247,6 +274,20 @@ public final class RecipeScorer {
      * expansion is worth doing twice.
      */
     public static final String RATE_DECIDED = "faster than the otherwise better ";
+
+    /**
+     * The reasons a winner carries when a loop term was withheld from it (M13 item 5).
+     *
+     * <p>Markers in the same sense as {@link #RATE_DECIDED}: {@code RecipeChooser} reads them to
+     * decide whether this expansion is worth doing a second time with the penalties back in force.
+     */
+    public static final String LOOP_IS_FED = "looks reversible, but the loop is fed";
+
+    /** @see #LOOP_IS_FED */
+    public static final String CLOSES_A_FED_LOOP = "closes a loop the plan feeds";
+
+    /** The largest penalty either loop term withholds, which bounds what a second walk can move. */
+    public static final double MAX_LOOP_PENALTY = 60;
 
     private RecipeScorer() {}
 
@@ -436,8 +477,16 @@ public final class RecipeScorer {
         // being scored identically, so the scorer was actively steering away from the loops the
         // pack builds on purpose (STATUS §6d.28). They are separated here rather than the sign
         // flipped, because both readings are right about their own case.
+        //
+        // And a third case, which is neither: an input the plan already makes *and* that the walk
+        // would be taking straight back off the line that makes it, in a loop something feeds
+        // (M13 item 5). That is not a risk being run, it is a loop being closed, and the plan is
+        // the better for it. Asked only where one of the other two readings would have applied, so
+        // a recipe with nothing loop-shaped about it never pays for the question.
         int cycleRisk = 0;
         int byproductFeeds = 0;
+        int fedLoops = 0;
+        Boolean fedCycle = null;
         for (MfpIngredient input : recipe.inputs()) {
             if (!input.consumed()) {
                 continue;
@@ -451,12 +500,22 @@ public final class RecipeScorer {
             if (spare) {
                 byproductFeeds++;
             } else if (produced) {
-                cycleRisk++;
+                if (fedCycle == null) {
+                    fedCycle = oracle.closesAFedCycle(recipe, key);
+                }
+                if (fedCycle) {
+                    fedLoops++;
+                } else {
+                    cycleRisk++;
+                }
             }
         }
         if (cycleRisk > 0) {
             score -= 20.0 * cycleRisk;
             reasons.add("consumes " + cycleRisk + " item(s) the plan already makes");
+        }
+        if (fedLoops > 0) {
+            reasons.add(CLOSES_A_FED_LOOP);
         }
         if (byproductFeeds > 0) {
             score += BYPRODUCT_BONUS * byproductFeeds;
@@ -479,10 +538,22 @@ public final class RecipeScorer {
         // the refinement term is the one with something to say, so the two overlap rather than one
         // silencing the other. Measured, not assumed: raising the refinement penalty instead let the
         // nugget conversion win outright (STATUS §6c.5).
+        //
+        // Unless the loop it would close is fed (M13 item 5). Reversibility is a claim that the two
+        // recipes cancel, and two recipes that between them eat charcoal and water and hand back
+        // logs do not cancel - they are the pack's tree loop, and the -60 was scoring it as though
+        // it were a nugget.
         if (oracle.isReversible(recipe, key)) {
-            boolean refines = refinement != null && refinement > 0;
-            score -= refines ? 25 : 60;
-            reasons.add(refines ? "reversible, but it refines" : "reversible conversion");
+            if (fedCycle == null) {
+                fedCycle = oracle.closesAFedCycle(recipe, key);
+            }
+            if (!fedCycle) {
+                boolean refines = refinement != null && refinement > 0;
+                score -= refines ? 25 : 60;
+                reasons.add(refines ? "reversible, but it refines" : "reversible conversion");
+            } else {
+                reasons.add(LOOP_IS_FED);
+            }
         }
 
         // GregTech generates a recycling recipe for every tool and machine in the game, and they
