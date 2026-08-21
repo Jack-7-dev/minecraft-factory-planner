@@ -938,7 +938,42 @@ public final class RecipeChooser {
         if (after.unsatisfied().size() > before.unsatisfied().size()) {
             return true;
         }
+        if (startsBuyingWhatItMakes(before, after, retry)) {
+            return true;
+        }
         return after.euDrawPerSecond() > before.euDrawPerSecond() * (1 + 1e-9);
+    }
+
+    /**
+     * Whether the retry gave up on making something and bought it instead.
+     *
+     * <p>Found on the pack's polyvinyl butyral chain from cold. The feeding round came back with a
+     * plan drawing 1.33 MEU/s where the plan it replaced drew 30.5 MEU/s, and the energy test waved
+     * it through - because the saving was not an efficiency. The round had talked the plan into a
+     * set of recipes that cannot balance butyraldehyde, so the engine relaxed it, and forty-one of
+     * the plan's forty-two lines sat at zero while the two intermediates it had a whole chemistry
+     * tree for were imported. <b>Not making something is always cheap.</b>
+     *
+     * <p>So the energy test needs the same rule §15.7 gave the pruning pass, for the same reason: an
+     * item the plan has a line for and buys anyway is the plan having given up, not the plan having
+     * economised. The two guards now say the same thing in the two places a plan can lose a chain.
+     *
+     * <p>Only items the previous plan was <em>not</em> already buying count, so a plan that shortens
+     * a shopping list it already had is unaffected.
+     */
+    private static boolean startsBuyingWhatItMakes(SolveResult before, SolveResult after,
+                                                   ChooserResult retry) {
+        for (MfpKey key : after.rawInputs().keySet()) {
+            if (before.rawInputs().containsKey(key)) {
+                continue;
+            }
+            for (Line line : retry.lines()) {
+                if (line.recipe().produces(key)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static SolverMode probeEngine(ChooserResult a, ChooserResult b) {

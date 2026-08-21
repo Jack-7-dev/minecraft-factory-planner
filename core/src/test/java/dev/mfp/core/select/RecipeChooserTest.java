@@ -1263,4 +1263,47 @@ class RecipeChooserTest {
                 .mapToDouble(line -> line.machineCount())
                 .findFirst().orElse(-1);
     }
+
+    /**
+     * A feeding round that stops the plan making something is not an economy.
+     *
+     * <p>The pack's polyvinyl butyral chain from cold, in five recipes. The widget wants acid and a
+     * hundred gas; the acid line is limited to one machine and gives off one solvent a second; and
+     * there is a way to make gas out of solvent, which the feeding round prefers because the solvent
+     * is going spare. Taking it is a catastrophe: one gas a second can be made and ninety-nine have
+     * to be bought, and because <b>not making something is always cheap</b> the plan's power bill
+     * collapses and the energy test waves it through. The real chain drew 30.5 MEU/s and the plan
+     * that gave up on it drew 1.33.
+     */
+    @Test
+    @DisplayName("a round that starts buying what the plan makes is refused, however cheap")
+    void aRoundThatGivesUpOnMakingSomethingIsRefused() {
+        MfpKey gas = MfpKey.fluid("mfp", "gas");
+        MfpKey solvent = MfpKey.fluid("mfp", "solvent");
+        MfpRecipe widget = MfpRecipe.builder("mfp:widget", "mfp:machine", "test")
+                .input(MfpIngredient.of(ACID, 1000))
+                .input(MfpIngredient.of(gas, 100))
+                .output(MfpOutput.of(WIDGET, 1))
+                .duration(20).euIn(16).minTier(1).build();
+        MfpRecipe acid = MfpRecipe.builder("mfp:acid", "mfp:machine", "test")
+                .input(MfpIngredient.of(ORE, 1))
+                .output(MfpOutput.of(ACID, 1000))
+                .output(MfpOutput.of(solvent, 1))
+                .duration(20).euIn(16).minTier(1).build();
+        RecipeIndex index = indexOf(widget, acid,
+                recipe("mfp:ingot", ORE, 1, INGOT, 1),
+                recipe("mfp:gas_from_ingot", INGOT, 1, gas, 1),
+                recipe("mfp:gas_from_solvent", solvent, 1, gas, 1));
+
+        Plan plan = new Plan("test").target(WIDGET, 1).rawMaterial(ORE);
+        // One machine's worth of acid, so the solvent it gives off is one a second and no more.
+        plan.configureMachine("mfp:acid",
+                MachineConfig.of("mfp:lv_machine", 1).withLimit(1.0, false));
+        new RecipeChooser(index).expandInto(plan);
+        SolveResult solved = Solvers.solve(plan);
+
+        assertFalse(solved.rawInputs().containsKey(gas),
+                () -> "the plan has a line making gas and must not buy it: " + solved.rawInputs());
+        assertEquals(100.0, machinesFor(solved, "mfp:gas_from_ingot"), 1e-6);
+    }
 }
