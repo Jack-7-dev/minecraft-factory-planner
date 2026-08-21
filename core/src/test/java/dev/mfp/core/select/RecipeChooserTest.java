@@ -1142,4 +1142,50 @@ class RecipeChooserTest {
 
         assertEquals(List.of("mfp:ingot_quick", "mfp:dust"), chosen);
     }
+
+    /**
+     * A chanced byproduct is offered as a supply, and whether it counts is a rate (M13 item 3).
+     *
+     * <p>The plan makes plates from ingots and acid, and the acid line drops salt it has no use for.
+     * There is a way to make the ingot out of salt. Whether taking it is an improvement depends
+     * entirely on how much salt actually falls out: at 5% the line would be routed around a trickle
+     * and the other 95% bought, at 60% the plan is genuinely getting the salt from itself.
+     */
+    private static RecipeIndex saltFallsOutOfTheAcid(double chance) {
+        MfpRecipe plate = MfpRecipe.builder("mfp:plate", "mfp:machine", "test")
+                .input(MfpIngredient.of(INGOT, 1))
+                .input(MfpIngredient.of(ACID, 1000))
+                .output(MfpOutput.of(PLATE, 1))
+                .duration(20).euIn(16).minTier(1).build();
+        MfpRecipe acid = MfpRecipe.builder("mfp:acid", "mfp:machine", "test")
+                .input(MfpIngredient.of(ORE, 1))
+                .output(MfpOutput.of(ACID, 1000))
+                .output(MfpOutput.chanced(SALT, 1, chance))
+                .duration(20).euIn(16).minTier(1).build();
+        return indexOf(plate, acid,
+                recipe("mfp:dust", ORE, 1, DUST, 1),
+                recipe("mfp:ingot_from_dust", DUST, 1, INGOT, 1),
+                recipe("mfp:ingot_from_salt", SALT, 1, INGOT, 1));
+    }
+
+    private static List<String> plateChain(RecipeIndex index) {
+        Plan plan = new Plan("test").target(PLATE, 1).rawMaterial(ORE);
+        return new RecipeChooser(index).expand(plan).lines().stream()
+                .map(line -> line.recipe().id()).toList();
+    }
+
+    @Test
+    @DisplayName("a 5% byproduct is not a supply, so no line is routed around it")
+    void aTrickleIsNotOffered() {
+        assertTrue(plateChain(saltFallsOutOfTheAcid(0.05)).contains("mfp:ingot_from_dust"),
+                "covering the demand from a twentieth would mean running the acid line "
+                        + "twenty times over, which is not a plan getting salt for free");
+    }
+
+    @Test
+    @DisplayName("a 60% byproduct is a supply, and the line moves onto it")
+    void aRealYieldIsOffered() {
+        assertTrue(plateChain(saltFallsOutOfTheAcid(0.6)).contains("mfp:ingot_from_salt"),
+                "three fifths of the demand is the plan getting the salt from itself");
+    }
 }

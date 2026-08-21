@@ -109,6 +109,7 @@ public final class RecipeChooser {
     /** Hard ceiling on the downstream set, so one pathological item cannot stall a plan. */
     private static final int DOWNSTREAM_KEY_LIMIT = 4096;
 
+
     private final RecipeIndex index;
     private final Preferences preferences;
     private final Map<MfpKey, Set<MfpKey>> downstreamCache = new LinkedHashMap<>();
@@ -621,7 +622,18 @@ public final class RecipeChooser {
         boolean large = first.lines().size() > LARGE_PLAN_LINES;
         int rounds = large ? 1 : MAX_BYPRODUCT_ROUNDS;
         for (int round = 0; round < rounds; round++) {
-            Set<MfpKey> spare = spareOutputs(best, plan);
+            Set<MfpKey> spare = spareOutputs(best, plan, false);
+            // Chanced outputs, left out of the spare set entirely until M13 item 3 on the grounds
+            // that a 5% trickle is not a supply. That is true of a 5% trickle and false of a 60%
+            // one, and the difference is a rate rather than a probability: five per cent of ten
+            // thousand millibuckets is a supply and sixty per cent of one item every two minutes is
+            // not. So they are offered like any other leftover and the rate decides, in the one
+            // place a rate exists - the costed plan that comes back. Covering a demand from a 5%
+            // drop means running the line that drops it twenty times over, which the pass already
+            // measures as energy and refuses; a 60% one is a plan getting the item from itself.
+            // Nothing is judged here about the probability, because the probability is not the
+            // question.
+            spare.addAll(spareOutputs(best, plan, true));
             if (spare.isEmpty() || !tried.addAll(spare)) {
                 break;      // nothing left over, or nothing left over that has not been offered
             }
@@ -810,19 +822,18 @@ public final class RecipeChooser {
     /**
      * What a plan makes and then has no use for.
      *
-     * <p><b>Guaranteed outputs only.</b> Being the source of a 5% byproduct is not being a supply of
-     * it, and offering one as though it were would have the chooser choose a recipe around a trickle.
-     * The same reason {@code isOnlyWayToMakeSomething} counts only guaranteed outputs.
+     * <p>Targets are excluded, because a target is not spare - it is the point.
      *
-     * <p>Targets are excluded, because a target is not spare — it is the point.
+     * @param chancedOnly when true, the items the plan produces <em>only</em> by chance
      */
-    private static Set<MfpKey> spareOutputs(ChooserResult result, Plan plan) {
-        Set<MfpKey> produced = new LinkedHashSet<>();
+    private static Set<MfpKey> spareOutputs(ChooserResult result, Plan plan, boolean chancedOnly) {
+        Set<MfpKey> chanced = new LinkedHashSet<>();
+        Set<MfpKey> guaranteed = new LinkedHashSet<>();
         Set<MfpKey> consumed = new LinkedHashSet<>();
         for (Line line : result.lines()) {
             for (MfpOutput output : line.recipe().outputs()) {
-                if (!output.isChanced() && output.amount() > 0) {
-                    produced.add(output.key());
+                if (output.isChanced() ? output.expectedAmount() > 0 : output.amount() > 0) {
+                    (output.isChanced() ? chanced : guaranteed).add(output.key());
                 }
             }
             for (MfpIngredient input : line.recipe().inputs()) {
@@ -831,6 +842,10 @@ public final class RecipeChooser {
                 }
             }
         }
+        if (chancedOnly) {
+            chanced.removeAll(guaranteed);
+        }
+        final Set<MfpKey> produced = chancedOnly ? chanced : guaranteed;
         produced.removeAll(consumed);
         plan.targets().forEach(target -> produced.remove(target.key()));
         produced.removeIf(MfpKey::isPseudo);
