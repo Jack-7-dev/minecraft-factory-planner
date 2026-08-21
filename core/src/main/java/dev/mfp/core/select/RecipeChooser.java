@@ -1282,7 +1282,8 @@ public final class RecipeChooser {
      *   <li>it <b>consumes something from outside itself</b> — a cycle whose only inputs are its own
      *       outputs cannot supply anything, which is every one of GregTech's packaging loops: nugget
      *       to ingot and back, ingot to block and back, macerate and re-smelt; and
-     *   <li>it <b>emits something the rest of the plan wants</b> and does not eat again.
+     *   <li>it <b>emits something the rest of the plan wants</b> - a target, or an input of a line
+     *       outside the loop - and, for the second of those, does not eat it again.
      * </ol>
      *
      * <p>Both halves are load-bearing, and the second one was learned the hard way against the pack.
@@ -1351,7 +1352,19 @@ public final class RecipeChooser {
         }
 
         for (MfpKey key : produced) {
-            if (key.isPseudo() || consumed.contains(key)) {
+            if (key.isPseudo()) {
+                continue;
+            }
+            if (isTarget(key, plan)) {
+                // A target is wanted whether or not the loop also eats some of it, and that is not
+                // a special case - it is the pack's tree loop. The greenhouse grows oak, the oak is
+                // charred, the charcoal is burnt in the greenhouse's own oxygen to make the carbon
+                // dioxide it drinks, and what leaves the loop is the surplus wood the plan asked
+                // for. Skipping every key the cycle consumes read that as a loop supplying nothing
+                // and steered around it, which is the one loop the milestone is named after.
+                return true;
+            }
+            if (consumed.contains(key)) {
                 continue;
             }
             if (wantedOutsideTheCycle(key, members, result, plan)) {
@@ -1361,13 +1374,20 @@ public final class RecipeChooser {
         return false;
     }
 
-    /** Whether something the plan asked for, or a line that is not in this loop, wants {@code key}. */
-    private static boolean wantedOutsideTheCycle(MfpKey key, Set<String> members,
-                                                 ChooserResult result, Plan plan) {
+    private static boolean isTarget(MfpKey key, Plan plan) {
         for (TargetOutput target : plan.targets()) {
             if (target.key().equals(key)) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    /** Whether a line that is not in this loop wants {@code key}. */
+    private static boolean wantedOutsideTheCycle(MfpKey key, Set<String> members,
+                                                 ChooserResult result, Plan plan) {
+        if (isTarget(key, plan)) {
+            return true;
         }
         for (Line line : result.lines()) {
             if (!members.contains(line.recipe().id()) && line.recipe().consumes(key)) {
