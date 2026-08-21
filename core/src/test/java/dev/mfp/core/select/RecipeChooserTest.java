@@ -13,6 +13,7 @@ import dev.mfp.core.plan.Preferences;
 import dev.mfp.core.plan.SolverMode;
 import dev.mfp.core.solver.SequentialSolver;
 import dev.mfp.core.solver.SolveResult;
+import dev.mfp.core.solver.Solvers;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -1187,5 +1188,79 @@ class RecipeChooserTest {
     void aRealYieldIsOffered() {
         assertTrue(plateChain(saltFallsOutOfTheAcid(0.6)).contains("mfp:ingot_from_salt"),
                 "three fifths of the demand is the plan getting the salt from itself");
+    }
+
+    /**
+     * A byproduct that covers part of a demand (M13 item 1).
+     *
+     * <p>The widget wants acid and a hundred plates. The acid line drops forty plates alongside the
+     * thousand millibuckets the plan needs anyway, so forty of them are free and sixty are not, and
+     * "take the forty and make the rest" is not a choice of recipe - which is the whole of the
+     * fault. Whether it is worth making the rest depends on what over-running the acid line costs,
+     * so that is the only thing the fixture varies.
+     *
+     * @param orePerAcidCraft what a craft of acid consumes, which is what running it 2.5 times over
+     *                        would cost the plan
+     */
+    private static RecipeIndex fortyPlatesFallOutOfTheAcid(double orePerAcidCraft) {
+        MfpRecipe widget = MfpRecipe.builder("mfp:widget", "mfp:machine", "test")
+                .input(MfpIngredient.of(ACID, 1000))
+                .input(MfpIngredient.of(PLATE, 100))
+                .output(MfpOutput.of(WIDGET, 1))
+                .duration(20).euIn(16).minTier(1).build();
+        MfpRecipe acid = MfpRecipe.builder("mfp:acid", "mfp:machine", "test")
+                .input(MfpIngredient.of(ORE, orePerAcidCraft))
+                .output(MfpOutput.of(ACID, 1000))
+                .output(MfpOutput.of(PLATE, 40))
+                .duration(20).euIn(16).minTier(1).build();
+        return indexOf(widget, acid,
+                recipe("mfp:plate", INGOT, 1, PLATE, 1),
+                recipe("mfp:ingot", ORE, 1, INGOT, 1));
+    }
+
+    private static SolveResult solvedPlateChain(RecipeIndex index) {
+        Plan plan = new Plan("test").target(WIDGET, 1).rawMaterial(ORE);
+        new RecipeChooser(index).expandInto(plan);
+        return Solvers.solve(plan);
+    }
+
+    @Test
+    @DisplayName("a byproduct covering part of a demand leaves the rest to a second source")
+    void aPartlyCoveredDemandGetsASecondSource() {
+        // A craft of acid eats a hundred ore, so running it two and a half times to squeeze out a
+        // hundred plates costs 250 ore where making sixty of them costs 60.
+        SolveResult solved = solvedPlateChain(fortyPlatesFallOutOfTheAcid(100));
+
+        assertEquals(160.0, solved.rawInputs().get(ORE), 1e-6);
+        assertTrue(solved.byproducts().isEmpty(),
+                () -> "nothing should be thrown away: " + solved.byproducts());
+        assertEquals(1.0, machinesFor(solved, "mfp:acid"), 1e-6,
+                "the acid line runs for the acid the plan wants, and no harder");
+        assertEquals(60.0, machinesFor(solved, "mfp:plate"), 1e-6,
+                "and the sixty plates it does not cover are made");
+    }
+
+    /**
+     * The other half, and it is the same pass: where over-running the line is the cheaper answer,
+     * the engine leaves the second source idle and the plan is the one line it always was. The
+     * chooser offers both and decides neither.
+     */
+    @Test
+    @DisplayName("where over-running the line is cheaper, the one line stands")
+    void aWholeDemandMayStillComeFromOneLine() {
+        SolveResult solved = solvedPlateChain(fortyPlatesFallOutOfTheAcid(1));
+
+        assertEquals(2.5, solved.rawInputs().get(ORE), 1e-6);
+        assertEquals(2.5, machinesFor(solved, "mfp:acid"), 1e-6);
+        assertEquals(2, solved.lines().size(),
+                () -> "a source the engine will not run has no business on the plan: "
+                        + solved.lines().stream().map(l -> l.line().recipe().id()).toList());
+    }
+
+    private static double machinesFor(SolveResult solved, String recipeId) {
+        return solved.lines().stream()
+                .filter(line -> line.line().recipe().id().equals(recipeId))
+                .mapToDouble(line -> line.machineCount())
+                .findFirst().orElse(-1);
     }
 }

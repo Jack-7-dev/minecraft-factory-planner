@@ -15,6 +15,8 @@ import dev.mfp.core.plan.Preferences;
 import dev.mfp.core.plan.RawMaterials;
 import dev.mfp.core.plan.SolverMode;
 import dev.mfp.core.plan.TargetOutput;
+import dev.mfp.core.solver.ItemFlows;
+import dev.mfp.core.solver.LineResult;
 import dev.mfp.core.solver.SolveResult;
 import dev.mfp.core.solver.Solvers;
 import dev.mfp.core.solver.ThroughputResolver;
@@ -154,6 +156,15 @@ public final class RecipeChooser {
 
     /** Whether the throughput term overturned a pick during this expansion. */
     private boolean rateDecidedAPick;
+
+    /**
+     * Items this walk may not answer with a particular recipe, and which one (M13 item 1).
+     *
+     * <p>Not a blacklist: the recipe stays on the plan and keeps supplying everything else it makes.
+     * What is withdrawn is its use as <em>the</em> answer to one demand, which is how the second
+     * half of {@link #cheaperOfTheSplitDecision}'s comparison gets built.
+     */
+    private Map<MfpKey, String> dedicatedFor = Map.of();
 
     /**
      * Items the previous expansion left over, for the byproduct-feeding pass (M11.1).
@@ -547,11 +558,12 @@ public final class RecipeChooser {
             if (!plan.byproductFeeds()) {
                 return best;
             }
-            return feedByproducts(plan, best);
+            return cheaperOfTheSplitDecision(plan, feedByproducts(plan, best));
         } finally {
             spareByproducts = Set.of();
             rateBlind = false;
             rateDecidedAPick = false;
+            dedicatedFor = Map.of();
         }
     }
 
@@ -594,6 +606,136 @@ public final class RecipeChooser {
         // out.
         rateBlind = true;
         return blind;
+    }
+
+    /**
+     * Expand again with a second source for a demand a line is being over-run to cover, and keep
+     * whichever plan the solver says is better (M13 item 1).
+     *
+     * <p>The gap §13a M13 item 1 names: "take the forty the plan already makes and produce the rest"
+     * is not a choice of recipe, and one recipe per item is all the walk can choose. So a line that
+     * drops forty plates alongside the acid the plan wants, asked for a hundred plates, is simply
+     * run two and a half times over and fifteen hundred millibuckets of acid are thrown away. That
+     * is a correct answer to a different question (§12.6), and whether it is the right one depends
+     * entirely on what is being wasted: on worthless acid it is the cheap answer, on expensive acid
+     * it is not.
+     *
+     * <p><b>Which is the solver's judgement, so the solver is asked.</b> The trigger comes out of
+     * the solve rather than out of the recipe: a line producing <em>more of a demanded item than the
+     * plan wants</em> is a line being run for something else it makes, and that something else is
+     * the demand worth a second source. Rare, precise, and not a guess about the recipe's shape -
+     * the same line in a plan that wanted all its acid would not raise it.
+     *
+     * <p>The alternative plan is built by withdrawing that recipe as the answer to that one demand,
+     * which leaves it on the plan supplying everything else it makes. So the second plan carries
+     * both sources, and how much comes from the byproduct and how much is made is decided by the
+     * engine. <b>Delivery first, then cost</b>: a plan that makes what was asked for beats one that
+     * leaves a target short however cheap it is, and a tie in both keeps the plan already in hand.
+     */
+    private ChooserResult cheaperOfTheSplitDecision(Plan plan, ChooserResult joined) {
+        SolverMode engine = probeEngine(joined, joined);
+        SolveResult one = probe(plan, joined, engine);
+        Map<MfpKey, String> wanted = one == null ? Map.of() : demandsBoughtWithWaste(one);
+        if (wanted.isEmpty()) {
+            return joined;
+        }
+
+        ChooserResult split;
+        dedicatedFor = wanted;
+        try {
+            split = expandSteeringAroundPackagingLoops(plan);
+            if (plan.byproductFeeds()) {
+                split = feedByproducts(plan, split);
+            }
+        } finally {
+            dedicatedFor = Map.of();
+        }
+        if (split.lines().isEmpty() || !stillMakesTargets(plan, split)
+                || split.unresolved().size() > joined.unresolved().size()) {
+            return joined;
+        }
+
+        // Both halves are costed by an engine that can actually divide a demand between two
+        // sources. This is M11.1's trap in a second dress: the sequential pass takes each line in
+        // turn and cannot split a demand at all, so it prices the two-source plan as though the
+        // second source were idle - the two plans come out identical to the last decimal and the
+        // comparison decides nothing. The whole-plan engine is the one being asked a question about
+        // the whole plan.
+        SolverMode whole = joined.lines().size() <= PROBE_LINE_LIMIT
+                && split.lines().size() <= PROBE_LINE_LIMIT ? SolverMode.SIMPLEX : engine;
+        SolveResult withOneSource = probe(plan, joined, whole);
+        SolveResult withTwo = probe(plan, split, whole);
+        if (withOneSource == null || withTwo == null) {
+            return joined;
+        }
+
+        // Delivery is the chooser's business, because a plan that does not make what was asked for
+        // is not an answer at any price.
+        double shortJoined = shortfall(withOneSource);
+        double shortSplit = shortfall(withTwo);
+        if (Math.abs(shortJoined - shortSplit) > ItemFlows.EPSILON) {
+            return shortSplit < shortJoined ? split : joined;
+        }
+
+        // The split itself is not. The engine has both sources in front of it and an objective the
+        // rest of MFP is already answered by - take what there is, then buy as little as possible -
+        // so what it does with the second source is the answer to the question this pass asks.
+        // Ranking the two plans on some other measure here would be the chooser deciding after all,
+        // which is the thing §13a M13 item 1 is about.
+        return usesASecondSource(split, withTwo, wanted) ? split : joined;
+    }
+
+    /** Whether the engine actually ran a source this pass added, rather than leaving it idle. */
+    private static boolean usesASecondSource(ChooserResult split, SolveResult solved,
+                                             Map<MfpKey, String> wanted) {
+        for (LineResult line : solved.lines()) {
+            String id = line.line().recipe().id();
+            for (Map.Entry<MfpKey, String> entry : wanted.entrySet()) {
+                if (!id.equals(entry.getValue()) && line.line().recipe().produces(entry.getKey())
+                        && line.machineCount() > ItemFlows.EPSILON) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Demands the plan is paying for by over-producing something else, and the line doing it.
+     *
+     * <p>A line appearing in both halves of its own result - some of an item demanded, more of the
+     * same item thrown away - is running faster than that item needs. Nothing else it makes can be
+     * the reason it runs at all, so every other demand it covers is a candidate for a source of its
+     * own. An ordinary byproduct nobody wants is not this: that item is surplus and never demanded,
+     * so it never appears on both sides.
+     */
+    private static Map<MfpKey, String> demandsBoughtWithWaste(SolveResult solved) {
+        Map<MfpKey, String> wanted = new LinkedHashMap<>();
+        for (LineResult line : solved.lines()) {
+            boolean overRun = false;
+            for (MfpKey key : line.outputs().keySet()) {
+                overRun |= line.byproducts().containsKey(key);
+            }
+            if (!overRun) {
+                continue;
+            }
+            for (MfpKey key : line.outputs().keySet()) {
+                if (!line.byproducts().containsKey(key)) {
+                    wanted.putIfAbsent(key, line.line().recipe().id());
+                }
+            }
+        }
+        return wanted;
+    }
+
+    /** How much of what the plan was asked for it does not deliver, as a fraction of each target. */
+    private static double shortfall(SolveResult solved) {
+        double missed = 0;
+        for (Map.Entry<MfpKey, Double> entry : solved.unsatisfied().entrySet()) {
+            double asked = entry.getValue() + solved.products().getOrDefault(entry.getKey(), 0.0);
+            missed += asked > 0 ? entry.getValue() / asked : 0;
+        }
+        return missed;
     }
 
     /**
@@ -1558,6 +1700,10 @@ public final class RecipeChooser {
                 return null;
             }
             for (MfpRecipe candidate : nodes.values()) {
+                if (candidate.id().equals(dedicatedFor.get(key))) {
+                    // The line stays; what is withdrawn is its use as the answer to this demand.
+                    continue;
+                }
                 for (MfpOutput output : candidate.outputs()) {
                     if (output.key().equals(key) && !output.isChanced() && output.amount() > 0) {
                         return candidate;
@@ -1632,8 +1778,14 @@ public final class RecipeChooser {
             if (standing != null) {
                 return standing;
             }
-            List<RecipeScorer.Scored> ranked = RecipeScorer.rank(
-                    key, usable(key, plan, extraBlacklist, unreachable), chosenOutputs(), oracle);
+            List<MfpRecipe> candidates = usable(key, plan, extraBlacklist, unreachable);
+            String withdrawn = dedicatedFor.get(key);
+            if (withdrawn != null) {
+                candidates = new ArrayList<>(candidates);
+                candidates.removeIf(candidate -> candidate.id().equals(withdrawn));
+            }
+            List<RecipeScorer.Scored> ranked =
+                    RecipeScorer.rank(key, candidates, chosenOutputs(), oracle);
             if (ranked.isEmpty()) {
                 recordWhyNothingWorks(key);
                 return null;
