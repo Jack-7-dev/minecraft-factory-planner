@@ -283,4 +283,103 @@ class RecipeScorerTest {
         assertTrue(RecipeScorer.score(product, eats, java.util.Set.of(), waterIsRaw)
                 .reasons().stream().noneMatch(reason -> reason.contains("already raw")));
     }
+
+    /**
+     * The throughput term (M13 item 2).
+     *
+     * <p>Rates as the base resolver computes them - twenty ticks a second, the recipe run as
+     * written - so a test asserts about the arithmetic the picker's rate column shows rather than
+     * about a number invented here.
+     */
+    private static final RecipeScorer.Oracle RATES = new RecipeScorer.Oracle() {
+        @Override
+        public double outputPerSecond(MfpRecipe recipe, MfpKey key) {
+            if (!recipe.hasRate()) {
+                return RecipeScorer.UNKNOWN_RATE;
+            }
+            double perCraft = 0;
+            for (MfpOutput output : recipe.outputs()) {
+                if (output.key().equals(key)) {
+                    perCraft += output.expectedAmount();
+                }
+            }
+            return perCraft <= 0 ? RecipeScorer.UNKNOWN_RATE : perCraft * 20.0 / recipe.durationTicks();
+        }
+    };
+
+    private static MfpRecipe makesIngots(String id, int amount, int duration) {
+        return MfpRecipe.builder(id, "mfp:machine", "test")
+                .input(MfpIngredient.of(DUST, 1))
+                .output(MfpOutput.of(INGOT, amount))
+                .duration(duration)
+                .build();
+    }
+
+    @Test
+    @DisplayName("a bigger batch over a proportionally longer cycle is not an improvement")
+    void aBatchWrittenLargerIsScoredTheSame() {
+        List<RecipeScorer.Scored> ranked = RecipeScorer.rank(INGOT,
+                List.of(makesIngots("mfp:one_at_a_time", 1, 20),
+                        makesIngots("mfp:eight_at_a_time", 8, 160)),
+                java.util.Set.of(), RATES);
+
+        assertEquals(ranked.get(0).score(), ranked.get(1).score());
+        assertTrue(ranked.stream().noneMatch(
+                one -> one.reasons().stream().anyMatch(reason -> reason.contains("slower"))));
+    }
+
+    @Test
+    @DisplayName("the same batch in an eighth of the time wins")
+    void aGenuinelyFasterRecipeIsPreferred() {
+        List<RecipeScorer.Scored> ranked = RecipeScorer.rank(INGOT,
+                List.of(makesIngots("mfp:slow", 1, 160), makesIngots("mfp:fast", 1, 20)),
+                java.util.Set.of(), RATES);
+
+        assertEquals("mfp:fast", ranked.get(0).recipe().id());
+        assertEquals(12.0, ranked.get(0).score() - ranked.get(1).score(), 1e-9);
+        assertTrue(ranked.get(1).reasons().contains("8.0x slower than the fastest way to make this"));
+    }
+
+    /**
+     * Hand crafting has no duration, so the question does not apply to it. Ranking it last for
+     * failing to answer would bury every shaped recipe behind whichever machine makes the item.
+     */
+    @Test
+    @DisplayName("a recipe with no rate at all is not treated as an infinitely slow one")
+    void aRecipeWithNoRateKeepsItsScore() {
+        MfpRecipe byHand = MfpRecipe.builder("mfp:by_hand", "minecraft:crafting_table", "test")
+                .input(MfpIngredient.of(DUST, 1))
+                .output(MfpOutput.of(INGOT, 1))
+                .build();
+        double alone = RecipeScorer.score(INGOT, byHand, java.util.Set.of(), RATES).score();
+
+        List<RecipeScorer.Scored> ranked = RecipeScorer.rank(INGOT,
+                List.of(byHand, makesIngots("mfp:fast", 64, 20), makesIngots("mfp:slow", 1, 20)),
+                java.util.Set.of(), RATES);
+
+        RecipeScorer.Scored scored = ranked.stream()
+                .filter(one -> one.recipe().id().equals("mfp:by_hand")).findFirst().orElseThrow();
+        assertEquals(alone, scored.score());
+    }
+
+    /**
+     * The floor. Past six halvings the answer is already "much slower", and a term running to
+     * hundreds of points would make every other judgement in this class decorative - including the
+     * ones that say whether the recipe is a way of obtaining the item at all.
+     */
+    @Test
+    @DisplayName("a thousand times slower is scored the same as sixty-four times slower")
+    void theThroughputPenaltyIsBounded() {
+        double atSixtyFour = gapBetweenFastestAnd(makesIngots("mfp:slow", 1, 64 * 20));
+        double atAThousand = gapBetweenFastestAnd(makesIngots("mfp:slow", 1, 1000 * 20));
+
+        assertEquals(24.0, atSixtyFour, 1e-9);
+        assertEquals(atSixtyFour, atAThousand, 1e-9);
+    }
+
+    private static double gapBetweenFastestAnd(MfpRecipe slow) {
+        List<RecipeScorer.Scored> ranked = RecipeScorer.rank(INGOT,
+                List.of(slow, makesIngots("mfp:fast", 1, 20)), java.util.Set.of(), RATES);
+        return ranked.get(0).score() - ranked.get(1).score();
+    }
 }

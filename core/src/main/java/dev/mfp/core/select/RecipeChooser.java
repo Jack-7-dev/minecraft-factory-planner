@@ -125,6 +125,36 @@ public final class RecipeChooser {
     private Set<MfpKey> rawMaterials = Set.of();
 
     /**
+     * The plan being worked on, for the scorer's throughput term.
+     *
+     * <p>Held for the same reason {@link #rawMaterials} is, and needed for a further reason: the
+     * rate a candidate achieves depends on the machine the line would be put on, and that is a
+     * question about this plan - the user may have chosen a machine for the recipe type, built one
+     * for the recipe itself, or set a default tier.
+     */
+    private Plan scoringPlan;
+
+    /**
+     * Per-machine rates already resolved during this walk, keyed by recipe.
+     *
+     * <p>The walk asks for the same key's candidates repeatedly - once per expansion round, and
+     * again for every plan the steering and feeding passes try - and resolving a rate means picking
+     * a machine and folding a behaviour chain. Cleared with the plan, because a different plan may
+     * put the same recipe on a different machine.
+     */
+    private final Map<String, Double> rateCache = new LinkedHashMap<>();
+
+    /**
+     * Whether this walk is being run with the scorer's throughput term switched off.
+     *
+     * <p>Not a setting: both halves of one comparison. See {@link #cheaperOfTheRateDecision}.
+     */
+    private boolean rateBlind;
+
+    /** Whether the throughput term overturned a pick during this expansion. */
+    private boolean rateDecidedAPick;
+
+    /**
      * Items the previous expansion left over, for the byproduct-feeding pass (M11.1).
      *
      * <p>Empty during the first walk by definition — the plan does not exist yet, so nothing is
@@ -180,7 +210,55 @@ public final class RecipeChooser {
         public boolean isSpareByproduct(MfpKey key) {
             return spareByproducts.contains(key);
         }
+
+        @Override
+        public double outputPerSecond(MfpRecipe recipe, MfpKey key) {
+            return RecipeChooser.this.outputPerSecond(recipe, key);
+        }
     };
+
+    /**
+     * How much of {@code key} one machine running {@code recipe} makes per second (M13 item 2).
+     *
+     * <p>Deliberately the same arithmetic as the recipe picker's rate column - the machine the plan
+     * would default to, through the resolver the plan is being costed with, times the expected
+     * amount of the item per craft. The screen and the scorer disagreeing about which recipe is
+     * faster would be worse than neither of them knowing.
+     *
+     * <p>Expected amount, so a 10% byproduct counts as a tenth. That double-counts chance against
+     * the term that already discounts a chanced output, and it should: one is about whether the
+     * recipe is a way of making the item on purpose, and this is about how much of it comes out per
+     * second, which is the question §13a M13 item 3 turns on.
+     */
+    private double outputPerSecond(MfpRecipe recipe, MfpKey key) {
+        if (rateBlind || !recipe.hasRate()) {
+            return RecipeScorer.UNKNOWN_RATE;
+        }
+        double perCraft = 0;
+        for (MfpOutput output : recipe.outputs()) {
+            if (output.key().equals(key)) {
+                perCraft += output.expectedAmount();
+            }
+        }
+        if (perCraft <= 0) {
+            return RecipeScorer.UNKNOWN_RATE;
+        }
+        Double crafts = rateCache.get(recipe.id());
+        if (crafts == null) {
+            MachineConfig config = MachinePicker.pick(index, recipe, scoringPlan, preferences);
+            crafts = resolver.resolve(recipe, config).craftsPerSecond();
+            rateCache.put(recipe.id(), crafts);
+        }
+        return crafts <= 0 ? RecipeScorer.UNKNOWN_RATE : crafts * perCraft;
+    }
+
+    /** Remember which plan the scorer's plan-dependent questions are being asked about. */
+    private void scoringPlan(Plan plan) {
+        if (scoringPlan != plan) {
+            rateCache.clear();
+        }
+        scoringPlan = plan;
+    }
 
     public RecipeChooser(RecipeIndex index) {
         this(index, Preferences.none());
@@ -448,6 +526,7 @@ public final class RecipeChooser {
      */
     public ChooserResult expand(Plan plan) {
         rawMaterials = plan.rawMaterials();
+        scoringPlan(plan);
         spareByproducts = Set.of();
         try {
             if (!plan.autoResolve()) {
@@ -461,13 +540,59 @@ public final class RecipeChooser {
                 return expandAvoiding(plan, Set.of());
             }
             ChooserResult best = expandSteeringAroundPackagingLoops(plan);
+            if (rateDecidedAPick) {
+                best = cheaperOfTheRateDecision(plan, best);
+            }
             if (!plan.byproductFeeds()) {
                 return best;
             }
             return feedByproducts(plan, best);
         } finally {
             spareByproducts = Set.of();
+            rateBlind = false;
+            rateDecidedAPick = false;
         }
+    }
+
+    /**
+     * Expand a second time without the throughput term, and keep whichever plan costs less.
+     *
+     * <p>The term judges a recipe by what one machine makes per second, which is the right question
+     * about a recipe and can be the wrong one about a factory. Both halves were measured on the dev
+     * chains: the fastest way to distil ethanol is from biomass rather than wood vinegar, and taking
+     * it drops the plan from 4.6 MEU/s to 12 kEU/s, while the fastest primitive blast furnace recipe
+     * for steel takes wrought iron, which this pack arc-furnaces out of oxygen it then has to fuse
+     * nitrogen plasma to obtain - 600 EU/s becomes 160 kEU/s. Both are near-ties in the scoring and
+     * nothing local separates them, so nothing local was asked: the plan is costed.
+     *
+     * <p>Only run when the term actually overturned something, which is what
+     * {@link RecipeScorer#RATE_DECIDED} is for - otherwise the second walk is guaranteed to produce
+     * the plan already in hand, at the price of expanding everything twice.
+     *
+     * <p><b>A tie goes to the faster plan.</b> Cost is what the comparison can see and it is not
+     * everything: two plans drawing the same power over the same number of lines are separated by
+     * how many machines the user has to build, which is precisely what this term knows and
+     * {@link #rank} does not - the aluminium chain is one forge hammer against forty macerators.
+     */
+    private ChooserResult cheaperOfTheRateDecision(Plan plan, ChooserResult withRate) {
+        rateBlind = true;
+        ChooserResult blind;
+        try {
+            blind = expandSteeringAroundPackagingLoops(plan);
+        } finally {
+            rateBlind = false;
+        }
+        if (blind.lines().isEmpty() || !stillMakesTargets(plan, blind)) {
+            return withRate;
+        }
+        if (rank(plan, withRate, blind) <= 0) {
+            return withRate;
+        }
+        // Kept for the rounds that follow: a feeding round re-walks the whole plan, and re-walking
+        // it under the setting that just lost would quietly rebuild the plan this comparison threw
+        // out.
+        rateBlind = true;
+        return blind;
     }
 
     /**
@@ -1064,6 +1189,7 @@ public final class RecipeChooser {
      */
     public List<RecipeScorer.Scored> alternatives(MfpKey key, Plan plan) {
         rawMaterials = plan == null ? RawMaterials.defaults() : plan.rawMaterials();
+        scoringPlan(plan);
         Set<MfpKey> produced = plan == null ? Set.of() : producedBy(plan);
         Set<MfpKey> preferred = preferences.preferredItemsFor(plan);
         List<RecipeScorer.Scored> ranked = RecipeScorer.rank(key, usable(key, plan), produced, oracle);
@@ -1496,6 +1622,12 @@ public final class RecipeChooser {
             if (ranked.isEmpty()) {
                 recordWhyNothingWorks(key);
                 return null;
+            }
+            for (String reason : ranked.get(0).reasons()) {
+                if (reason.startsWith(RecipeScorer.RATE_DECIDED)) {
+                    rateDecidedAPick = true;
+                    break;
+                }
             }
             return ranked.get(0).recipe();
         }

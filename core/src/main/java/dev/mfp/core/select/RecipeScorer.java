@@ -8,6 +8,7 @@ import dev.mfp.core.model.MfpOutput;
 import dev.mfp.core.model.MfpRecipe;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
@@ -113,6 +114,32 @@ public final class RecipeScorer {
      */
     private static final double BYPRODUCT_BONUS = 20;
 
+    /**
+     * Per halving of throughput against the fastest candidate for the same item.
+     *
+     * <p>Applied per doubling because rate is a ratio, not a difference: 2/s against 1/s is the same
+     * comparison as 2000 mB/s against 1000 mB/s, and every other term in this class is a small
+     * whole number, so a raw rate would swamp all of them on any fluid.
+     *
+     * <p>Sized to lose a close call and not to overturn a structural one. Four points a halving puts
+     * a route eight times slower thirteen points down — enough to settle two recipes that differ only
+     * in how their batch is written, which is the case §13a M13 item 2 names, and nowhere near
+     * {@link #TERMINAL_BONUS} or the recycling penalty, which say something about whether the recipe
+     * is a way of obtaining the item at all. A slow recipe is still a way of obtaining the item; it
+     * just needs more machines.
+     */
+    private static final double THROUGHPUT_PER_HALVING = 4;
+
+    /**
+     * The floor on that term, at sixty-four times slower.
+     *
+     * <p>Without it the ratio is unbounded — a 5% byproduct of a two-minute recipe against a
+     * dedicated one is thousands of times slower — and one term running to hundreds of points would
+     * make every other judgement in this class decorative. Past six halvings the answer is already
+     * "much slower", and how much past does not change the ranking.
+     */
+    private static final double MAX_THROUGHPUT_PENALTY = 24;
+
     /** A candidate and why it scored what it did. */
     public record Scored(MfpRecipe recipe, double score, List<String> reasons)
             implements Comparable<Scored> {
@@ -178,6 +205,25 @@ public final class RecipeScorer {
         }
 
         /**
+         * How much of {@code key} one machine running this recipe makes per second.
+         *
+         * <p>The picker's rate column, asked of the scorer instead of the screen. "Makes 8 dust"
+         * says nothing without the cycle it takes, and until this existed the scorer ranked the
+         * recipe as written, so a bigger batch over a proportionally longer duration scored the
+         * same as a genuine improvement (§13a M13 item 2).
+         *
+         * <p>It has to be answered by the caller because it depends on the machine the plan would
+         * put the line on, which is a choice the scorer does not make and must not: this is the
+         * coupling P6 permits — policy may depend on the maths, the maths may not depend on policy.
+         *
+         * @return the rate, or {@link #UNKNOWN_RATE} for hand crafting and anything else with no
+         *         intrinsic rate to compare
+         */
+        default double outputPerSecond(MfpRecipe recipe, MfpKey key) {
+            return UNKNOWN_RATE;
+        }
+
+        /**
          * How hard the easiest machine that runs this recipe is to build, as a voltage tier.
          *
          * @return the tier, 0 for something craftable by hand, or {@link #UNKNOWN_BUILD_COST} when
@@ -190,6 +236,17 @@ public final class RecipeScorer {
 
     /** No machine cost is known, so the term is skipped rather than guessed at. */
     public static final int UNKNOWN_BUILD_COST = -1;
+
+    /** No rate is known, so the throughput term is skipped rather than guessed at. */
+    public static final double UNKNOWN_RATE = -1;
+
+    /**
+     * The reason a winner carries when the throughput term is what won it, naming the runner-up.
+     *
+     * <p>A marker as much as a sentence: {@code RecipeChooser} reads it to decide whether this
+     * expansion is worth doing twice.
+     */
+    public static final String RATE_DECIDED = "faster than the otherwise better ";
 
     private RecipeScorer() {}
 
@@ -208,8 +265,83 @@ public final class RecipeScorer {
         for (MfpRecipe recipe : candidates) {
             scored.add(score(key, recipe, alreadyProduced, oracle));
         }
+        scored = withThroughput(key, scored, oracle);
         scored.sort(null);
         return scored;
+    }
+
+    /**
+     * The throughput term, which is the one judgement here that is not about a single recipe.
+     *
+     * <p>Rate has no absolute meaning - 1/s is fast for an ingot and a trickle for a fluid - so
+     * "fast" can only mean "fast for this item", and the comparison is against the fastest candidate
+     * offered for the same key. That is why this lives in {@link #rank} rather than in
+     * {@link #score}: a per-candidate score cannot express it, and inventing an absolute scale would
+     * be the same guess §8.3's distance-to-raw metric was withdrawn for.
+     *
+     * <p><b>A candidate with no rate is left alone rather than ranked last.</b> Hand crafting has no
+     * duration and no machine, so the question does not apply to it; scoring it as infinitely slow
+     * would bury every shaped recipe in the game behind whichever machine happens to make the item.
+     * This is the same rule the refinement term takes for an unclassified item, for the same reason.
+     */
+    private static List<Scored> withThroughput(MfpKey key, List<Scored> scored, Oracle oracle) {
+        if (scored.size() < 2) {
+            // Nothing to be fast relative to, and the common case for an item with one recipe, so
+            // it is worth not asking the oracle at all.
+            return scored;
+        }
+
+        double[] rates = new double[scored.size()];
+        double fastest = 0;
+        int known = 0;
+        for (int i = 0; i < scored.size(); i++) {
+            double rate = oracle.outputPerSecond(scored.get(i).recipe(), key);
+            rates[i] = rate > 0 && Double.isFinite(rate) ? rate : UNKNOWN_RATE;
+            if (rates[i] > 0) {
+                known++;
+                fastest = Math.max(fastest, rates[i]);
+            }
+        }
+        if (known < 2) {
+            return scored;
+        }
+
+        Scored wonWithout = Collections.min(scored);
+        List<Scored> adjusted = new ArrayList<>(scored.size());
+        for (int i = 0; i < scored.size(); i++) {
+            Scored one = scored.get(i);
+            if (rates[i] <= 0 || rates[i] >= fastest) {
+                adjusted.add(one);
+                continue;
+            }
+            double ratio = fastest / rates[i];
+            double halvings = Math.log(ratio) / Math.log(2);
+            double penalty = Math.min(MAX_THROUGHPUT_PENALTY, THROUGHPUT_PER_HALVING * halvings);
+            List<String> reasons = new ArrayList<>(one.reasons());
+            reasons.add(times(ratio) + " slower than the fastest way to make this");
+            adjusted.add(new Scored(one.recipe(), one.score() - penalty, List.copyOf(reasons)));
+        }
+
+        // Say so when the term is the whole reason for the answer, because the caller has to know.
+        // Rate is the one judgement here that can be right about the recipe and wrong about the
+        // factory - the fastest way to make steel takes wrought iron, and wrought iron in this pack
+        // is arc-furnaced out of oxygen the plan then has to fuse nitrogen to obtain. So an
+        // expansion that turns on this marker is expanded a second time without the term and the two
+        // plans are costed against each other; nothing else in this class needs that treatment,
+        // because nothing else in it changes an answer that the rest of the scoring had settled.
+        Scored wonWith = Collections.min(adjusted);
+        if (!wonWith.recipe().id().equals(wonWithout.recipe().id())) {
+            List<String> reasons = new ArrayList<>(wonWith.reasons());
+            reasons.add(RATE_DECIDED + wonWithout.recipe().id());
+            adjusted.set(adjusted.indexOf(wonWith),
+                    new Scored(wonWith.recipe(), wonWith.score(), List.copyOf(reasons)));
+        }
+        return adjusted;
+    }
+
+    /** "12x", or "1.5x" below ten, where rounding would say "1x" about a real difference. */
+    private static String times(double ratio) {
+        return ratio < 9.5 ? String.format("%.1fx", ratio) : Math.round(ratio) + "x";
     }
 
     public static Scored score(MfpKey key, MfpRecipe recipe, Set<MfpKey> alreadyProduced) {

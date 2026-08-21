@@ -1086,4 +1086,60 @@ class RecipeChooserTest {
         plan.chooseRecipe(DUST, "mfp:dust");
         assertEquals(List.of("mfp:ingot", "mfp:dust"), ids(new RecipeChooser(index).expand(plan)));
     }
+
+    private static MfpRecipe timed(String id, MfpKey in, double inAmount, MfpKey out,
+                                   double outAmount, int duration, int euIn) {
+        return MfpRecipe.builder(id, "mfp:machine", "test")
+                .input(MfpIngredient.of(in, inAmount))
+                .output(MfpOutput.of(out, outAmount))
+                .duration(duration)
+                .euIn(euIn)
+                .minTier(1)
+                .build();
+    }
+
+    /**
+     * The dev steel chain, in five recipes (M13 item 2).
+     *
+     * <p>The faster way to make the ingot is the right answer about the recipe and the wrong one
+     * about the factory: it takes salt, and salt in this index is boiled out of an acid that costs
+     * two hundred and fifty times the power of the whole rest of the plan. Nothing the scorer can
+     * see says so, so the expansion is costed rather than argued about.
+     */
+    @Test
+    @DisplayName("a faster recipe is dropped again when the chain under it costs more")
+    void aFasterRecipeLosesToACheaperPlan() {
+        RecipeIndex index = indexOf(
+                timed("mfp:dust", ORE, 1, DUST, 1, 20, 16),
+                timed("mfp:ingot_from_dust", DUST, 1, INGOT, 1, 40, 16),
+                timed("mfp:ingot_from_salt", SALT, 1, INGOT, 1, 20, 16),
+                timed("mfp:salt", ACID, 1000, SALT, 1, 20, 16),
+                timed("mfp:acid", ORE, 1, ACID, 1000, 20, 4096));
+
+        Plan plan = new Plan("test").target(INGOT, 1).rawMaterial(ORE);
+        List<String> chosen = new RecipeChooser(index).expand(plan).lines().stream()
+                .map(line -> line.recipe().id()).toList();
+
+        assertEquals(List.of("mfp:ingot_from_dust", "mfp:dust"), chosen);
+    }
+
+    /**
+     * And the other half, which is why the term is worth having at all: where the plan costs the
+     * same either way, the faster recipe stands. Both routes here draw 640 EU/s; one of them is a
+     * machine to build and the other is two.
+     */
+    @Test
+    @DisplayName("where two plans cost the same, the one needing fewer machines wins")
+    void aFasterRecipeSurvivesACostTie() {
+        RecipeIndex index = indexOf(
+                timed("mfp:dust", ORE, 1, DUST, 1, 20, 16),
+                timed("mfp:ingot_batch", DUST, 1, INGOT, 1, 40, 16),
+                timed("mfp:ingot_quick", DUST, 1, INGOT, 1, 20, 32));
+
+        Plan plan = new Plan("test").target(INGOT, 1).rawMaterial(ORE);
+        List<String> chosen = new RecipeChooser(index).expand(plan).lines().stream()
+                .map(line -> line.recipe().id()).toList();
+
+        assertEquals(List.of("mfp:ingot_quick", "mfp:dust"), chosen);
+    }
 }
