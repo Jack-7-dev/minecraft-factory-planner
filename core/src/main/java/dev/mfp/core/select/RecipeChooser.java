@@ -789,10 +789,16 @@ public final class RecipeChooser {
             // predict which a plan wants.
             ChooserResult offered = walk(plan, false);
             ChooserResult andNotAReversal = large ? offered : walk(plan, true);
-            ChooserResult chosen = better(plan, best, offered, andNotAReversal);
+            ChooserResult chosen = better(plan, best, spare, offered, andNotAReversal);
+            if (chosen == null) {
+                // The round found nothing worth keeping on its own terms. Before giving up, ask
+                // whether it was the *first half* of something (M13 item 4).
+                chosen = pairedWithASecondPick(plan, best, spare, large, offered, andNotAReversal);
+            }
             if (chosen == null) {
                 break;
             }
+            tried.addAll(spare);
             for (MfpKey key : spare) {
                 if (consumedBy(chosen, key) && !consumedBy(best, key) && !fed.contains(key)) {
                     fed.add(key);
@@ -822,7 +828,76 @@ public final class RecipeChooser {
      * beats a shorter one. Only candidates that eat something spare and pass {@link #isNoWorse} are
      * considered at all, so this is choosing between improvements rather than picking a least-worst.
      */
-    private ChooserResult better(Plan plan, ChooserResult best, ChooserResult a, ChooserResult b) {
+    /**
+     * A pair of picks that is only worth taking together (M13 item 4).
+     *
+     * <p>The pass offers what the plan throws away, walks once and judges the result, so it can only
+     * find a swap that pays for itself <em>on its own</em>. Where the saving is one step further
+     * down - the first swap gives off something a second recipe wants, and only the second recipe is
+     * cheaper - the round rejects the first half on cost, stops, and never reaches the half that was
+     * the whole point. That is a real shape: a chemical step taken for its main product is very
+     * often the only thing in a pack that emits some intermediate, and nothing produces that
+     * intermediate until the step is on the plan.
+     *
+     * <p>So a rejected candidate is read as a hypothesis rather than as an answer. What it would
+     * have thrown away is offered <em>alongside</em> what the current plan throws away, and the walk
+     * runs once more. One walk is enough for both picks because the walk is not incremental: given
+     * both sets of leftovers the scorer re-derives the first pick for the first set and the second
+     * pick for the second, and the plan that comes back contains the pair.
+     *
+     * <p>Nothing is relaxed to make room for it. The pair is judged against the incumbent by the
+     * same three gates as any other round, and the reason-to-keep is deliberately the narrower one:
+     * it must eat something from the <em>second</em> set, which is the thing that only exists if the
+     * first pick was made. A pair that only eats what round one already offered is round one again,
+     * and round one was refused.
+     *
+     * <p>Only a candidate that ate something itself is read this way. A walk that came back
+     * consuming nothing spare is not half of anything - it is the scorer having wandered - and
+     * chasing its leftovers would be a second full walk spent on a guess.
+     *
+     * @param offered the leftovers this round offered; grown by the second set when a pair is kept,
+     *                so the caller can report what was fed
+     */
+    private ChooserResult pairedWithASecondPick(Plan plan, ChooserResult best, Set<MfpKey> offered,
+                                                boolean large, ChooserResult... rejected) {
+        if (large) {
+            // Not on a plan of this size. The round above already gives a large plan one walk
+            // instead of two for the same reason, and this is the same judgement one step further
+            // on: chasing a pair means a whole extra walk of the graph on the strength of a
+            // rejected guess, and on the pack's tungsten plan a walk is five seconds. Measured at
+            // 17 s of choosing against 28 s, for a pair that was refused both times it was tried.
+            return null;
+        }
+
+        Set<MfpKey> second = new LinkedHashSet<>();
+        for (ChooserResult candidate : rejected) {
+            if (candidate != null && eats(best, candidate, offered)) {
+                second.addAll(spareOutputs(candidate, plan, false));
+            }
+        }
+        second.removeAll(offered);
+        if (second.isEmpty()) {
+            return null;       // the rejected round leaves nothing new lying about, so there is no pair
+        }
+
+        offered.addAll(second);
+        spareByproducts = offered;
+        ChooserResult pair = walk(plan, false);
+        ChooserResult pairKeepingReversals = walk(plan, true);
+        ChooserResult chosen = better(plan, best, second, pair, pairKeepingReversals);
+        if (chosen == null) {
+            offered.removeAll(second);
+        }
+        return chosen;
+    }
+
+    /**
+     * The better of two candidates, or null when neither is worth keeping.
+     *
+     * @param mustEat what a candidate has to consume for there to be any reason to keep it
+     */
+    private ChooserResult better(Plan plan, ChooserResult best, Set<MfpKey> mustEat,
+                                 ChooserResult a, ChooserResult b) {
         // Every gate is applied to each candidate on its own before they are ranked against each
         // other. Ranking first and gating the winner loses a good plan to a better-looking one that
         // turns out to be too expensive - which is exactly what happened to the polyethylene chain,
@@ -830,7 +905,7 @@ public final class RecipeChooser {
         // fewer thing and then failed on cost.
         List<ChooserResult> viable = new ArrayList<>(2);
         for (ChooserResult candidate : List.of(a, b)) {
-            if (eats(best, candidate) && isNoWorse(plan, best, candidate)
+            if (eats(best, candidate, mustEat) && isNoWorse(plan, best, candidate)
                     && !costsMore(plan, best, candidate)) {
                 viable.add(candidate);
             }
@@ -845,8 +920,8 @@ public final class RecipeChooser {
     }
 
     /** Whether a candidate consumes something the previous plan was throwing away. */
-    private boolean eats(ChooserResult best, ChooserResult candidate) {
-        for (MfpKey key : spareByproducts) {
+    private boolean eats(ChooserResult best, ChooserResult candidate, Set<MfpKey> spare) {
+        for (MfpKey key : spare) {
             if (consumedBy(candidate, key) && !consumedBy(best, key)) {
                 return true;
             }

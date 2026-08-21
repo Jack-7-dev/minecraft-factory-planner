@@ -781,6 +781,8 @@ class RecipeChooserTest {
     private static final MfpKey FRAME = MfpKey.item("mfp", "frame");
     private static final MfpKey OXYGEN = MfpKey.fluid("mfp", "oxygen");
     private static final MfpKey BRINE = MfpKey.fluid("mfp", "brine");
+    private static final MfpKey POLYMER = MfpKey.item("mfp", "polymer");
+    private static final MfpKey SLURRY = MfpKey.item("mfp", "slurry");
     private static final MfpKey NUGGET = MfpKey.item("mfp", "nugget");
     private static final MfpKey LOG = MfpKey.item("mfp", "log");
     private static final MfpKey CHARCOAL = MfpKey.item("mfp", "charcoal");
@@ -1305,5 +1307,118 @@ class RecipeChooserTest {
         assertFalse(solved.rawInputs().containsKey(gas),
                 () -> "the plan has a line making gas and must not buy it: " + solved.rawInputs());
         assertEquals(100.0, machinesFor(solved, "mfp:gas_from_ingot"), 1e-6);
+    }
+
+    /**
+     * A pair of picks only worth taking together (M13 item 4).
+     *
+     * <p>The feeding pass offers what the current plan throws away, walks once, and judges the
+     * result. So it can only ever find a swap that pays for itself <em>on its own</em>: the first
+     * half of a pair is rejected on cost, the round stops, and the second half - which is where all
+     * the saving was - is never reached.
+     *
+     * <p>Here the frame gives off oxygen, and the gasket recipe that eats it draws eight times the
+     * power of the brine one, so taking it alone makes the plan more expensive and the round refuses
+     * it. But that gasket recipe gives off acid, and the polymer the widget also needs can be made
+     * from acid for a thirtieth of what its ore route costs. Neither swap is worth making on its
+     * own; the pair is worth making by a factor of three.
+     *
+     * <p>The cost is carried in the energy rather than the duration deliberately: the scorer has
+     * been able to see a rate since item 2 and cannot see a power bill, so a difference written as
+     * duration would be judged at the pick instead of at the plan, which is not the fault under
+     * test.
+     */
+    private static RecipeIndex pairedSwapIndex() {
+        return indexOf(
+                MfpRecipe.builder("mfp:widget", "mfp:machine", "test")
+                        .input(MfpIngredient.of(GASKET, 1))
+                        .input(MfpIngredient.of(FRAME, 1))
+                        .input(MfpIngredient.of(POLYMER, 1))
+                        .output(MfpOutput.of(WIDGET, 1))
+                        .duration(20).euIn(16).minTier(1).build(),
+                MfpRecipe.builder("mfp:frame", "mfp:machine", "test")
+                        .input(MfpIngredient.of(ORE, 1))
+                        .output(MfpOutput.of(FRAME, 1))
+                        .output(MfpOutput.of(OXYGEN, 1000))
+                        .duration(20).euIn(16).minTier(1).build(),
+                // The first half of the pair: it eats the spare oxygen, it gives off acid, and it
+                // costs eight times the power of the route it would replace.
+                MfpRecipe.builder("mfp:gasket_from_oxygen", "mfp:machine", "test")
+                        .input(MfpIngredient.of(DUST, 1))
+                        .input(MfpIngredient.of(OXYGEN, 1000))
+                        .output(MfpOutput.of(GASKET, 1))
+                        .output(MfpOutput.of(ACID, 1000))
+                        .duration(20).euIn(128).minTier(1).build(),
+                MfpRecipe.builder("mfp:gasket_from_brine", "mfp:machine", "test")
+                        .input(MfpIngredient.of(DUST, 1))
+                        .input(MfpIngredient.of(BRINE, 1000))
+                        .output(MfpOutput.of(GASKET, 1))
+                        .duration(20).euIn(16).minTier(1).build(),
+                recipe("mfp:brine", SALT, 1, BRINE, 1000),
+                // The second half, and where the saving is. Nothing makes acid until the first half
+                // is taken, so this recipe is invisible to a round that judges the first half alone.
+                MfpRecipe.builder("mfp:polymer_from_acid", "mfp:machine", "test")
+                        .input(MfpIngredient.of(ACID, 1000))
+                        // A second input, so the two polymer recipes are not an exact tie broken by
+                        // the order of the index. It costs three points and the byproduct bonus is
+                        // twenty, which is the whole point: the acid route loses on its own and wins
+                        // the moment there is acid going spare.
+                        .input(MfpIngredient.of(ORE, 1))
+                        .output(MfpOutput.of(POLYMER, 1))
+                        .duration(20).euIn(16).minTier(1).build(),
+                // Routed through an intermediate rather than straight off ore, so that the scorer
+                // ranks it on the chain rather than on the terminal bonus.
+                MfpRecipe.builder("mfp:polymer_from_slurry", "mfp:machine", "test")
+                        .input(MfpIngredient.of(SLURRY, 1))
+                        .output(MfpOutput.of(POLYMER, 1))
+                        .duration(20).euIn(512).minTier(1).build(),
+                recipe("mfp:slurry", ORE, 1, SLURRY, 1));
+    }
+
+    @Test
+    @DisplayName("a pair of swaps only worth it together is taken")
+    void aPairOfSwapsOnlyWorthItTogetherIsTaken() {
+        RecipeIndex index = pairedSwapIndex();
+
+        Plan without = new Plan("no feeding").target(WIDGET, 1).byproductFeeds(false);
+        ChooserResult plain = new RecipeChooser(index).expand(without);
+
+        Plan with = new Plan("feeding").target(WIDGET, 1);
+        ChooserResult paired = new RecipeChooser(index).expand(with);
+
+        assertTrue(ids(plain).contains("mfp:gasket_from_brine")
+                        && ids(plain).contains("mfp:polymer_from_slurry"),
+                () -> "the first walk takes neither half: " + ids(plain));
+        assertTrue(ids(paired).contains("mfp:gasket_from_oxygen"),
+                () -> "the first half is a loss on its own and is kept anyway: " + ids(paired));
+        assertTrue(ids(paired).contains("mfp:polymer_from_acid"),
+                () -> "because the second half is what pays for it: " + ids(paired));
+        assertTrue(cost(with, paired) < cost(without, plain) / 2,
+                () -> "and the pair is worth a great deal more than either half: "
+                        + cost(with, paired) + " against " + cost(without, plain));
+    }
+
+    /**
+     * And the half is still refused when it is only ever a half. Same index with the acid route to
+     * polymer removed: the slower gasket recipe now buys the plan nothing and the round must say so.
+     */
+    @Test
+    @DisplayName("a swap with no second half is still refused")
+    void aSwapThatPaysForNothingIsStillRefused() {
+        RecipeIndex index = indexOf(pairedSwapIndex().all().stream()
+                .filter(r -> !r.id().equals("mfp:polymer_from_acid"))
+                .toArray(MfpRecipe[]::new));
+
+        ChooserResult result = new RecipeChooser(index).expand(new Plan("feeding").target(WIDGET, 1));
+
+        assertTrue(ids(result).contains("mfp:gasket_from_brine"),
+                () -> "eating a byproduct is not a reason to pay more for nothing: " + ids(result));
+    }
+
+    private static double cost(Plan plan, ChooserResult result) {
+        Plan costed = plan.copy(plan.name());
+        costed.clearLines();
+        result.lines().forEach(costed::add);
+        return Solvers.solve(costed).euDrawPerSecond();
     }
 }
