@@ -91,6 +91,22 @@ public final class RecipePickerScreen extends ModalScreen {
     private int hiddenByCap;
     private boolean showHidden;
     private BehaviourThroughputResolver resolver;
+    /**
+     * One chooser for the life of the dialog, not one per rebuild.
+     *
+     * <p>Every keystroke in the search box rebuilds this screen, and since M14 ranking asks what
+     * the blacklist costs several items upstream - a search the chooser only pays for once and then
+     * caches. A fresh chooser each rebuild would throw that cache away on every letter typed, which
+     * is precisely the way of doing this the milestone warns against. The chooser holds no plan
+     * state, so reusing it across a pin, a hide or an unblock is safe: its caches are keyed by the
+     * thing that would invalidate them.
+     */
+    private final RecipeChooser chooser = new RecipeChooser(ClientIndex.get(), preferences());
+
+    /** Recipes the last expansion steered around because they closed a loop nothing fed. */
+    private final java.util.Set<String> avoided = ClientPlanner.current() == null
+            ? java.util.Set.of()
+            : java.util.Set.copyOf(ClientPlanner.current().chooserResult().avoidedForCycles());
     private TextField search;
     private String filter = "";
     private boolean showAll;
@@ -177,7 +193,6 @@ public final class RecipePickerScreen extends ModalScreen {
         search.bounds(searchX, unpin.y(), Math.max(60, contentX() + contentWidth() - searchX), 14);
         widgets.add(search);
 
-        RecipeChooser chooser = new RecipeChooser(ClientIndex.get(), preferences());
         List<RecipeScorer.Scored> ranked = chooser.alternatives(key, plan);
         count = ranked.size();
         // Filtered before grouping, so the tabs and their counts describe what is actually on
@@ -313,6 +328,7 @@ public final class RecipePickerScreen extends ModalScreen {
                         Cells.iconTwoLine(MachineStacks.iconForRecipeType(recipe.recipeTypeId()),
                                 MachineStacks.shortName(recipe.recipeTypeId()), colour,
                                 (isStanding ? "your default  -  " : "")
+                                        + (avoided.contains(recipe.id()) ? "loop  -  " : "")
                                         + recipe.recipeTypeId() + durationSuffix(recipe),
                                 recipeTooltip(recipe, scored)),
                         Cells.flows(outputSlots(recipe)),
@@ -524,8 +540,7 @@ public final class RecipePickerScreen extends ModalScreen {
                 hidden++;
             }
         }
-        return hidden + new RecipeChooser(ClientIndex.get(), preferences())
-                .blockedAlternatives(key, plan).size();
+        return hidden + chooser.blockedAlternatives(key, plan).size();
     }
 
     private void hide(MfpRecipe recipe) {
@@ -595,6 +610,25 @@ public final class RecipePickerScreen extends ModalScreen {
         lines.add(Component.literal(recipe.id()).withStyle(ChatFormatting.WHITE));
         lines.add(Component.literal(recipe.recipeTypeId() + "  (" + recipe.providerId() + ")")
                 .withStyle(ChatFormatting.DARK_GRAY));
+        // What the scorer thought, in its own words (M14). `mfp alternatives` has printed the score
+        // and its reasons since M9.13 and this screen - the one an actual player reads - printed
+        // neither, so the ranking arrived as an order with no argument behind it. The gap between
+        // two rows is the whole question: a point apart is a tie the user should break, fifty apart
+        // is the scorer having an opinion they can disagree with.
+        lines.add(Component.literal(String.format(java.util.Locale.ROOT, "score %.1f", scored.score()))
+                .withStyle(ChatFormatting.GRAY));
+        for (String reason : scored.reasons()) {
+            lines.add(Component.literal("  " + reason).withStyle(ChatFormatting.DARK_GRAY));
+        }
+        if (avoided.contains(recipe.id())) {
+            // Not a property of the recipe and not something this screen could work out: the
+            // expansion tried it, found it closed a loop that fed nobody, and built the plan
+            // without it. Saying so is the difference between a recipe the user has not chosen and
+            // one MFP has already chosen against.
+            lines.add(Component.literal("passed over to keep the plan acyclic")
+                    .withStyle(ChatFormatting.YELLOW));
+            lines.add(Component.literal("pin it to use it anyway").withStyle(ChatFormatting.GRAY));
+        }
         if (recipe.minTier() >= 0) {
             lines.add(Component.literal("needs tier " + recipe.minTier()).withStyle(ChatFormatting.GRAY));
         }

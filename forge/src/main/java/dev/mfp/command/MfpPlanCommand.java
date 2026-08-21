@@ -757,9 +757,22 @@ public final class MfpPlanCommand {
         PlanSession session = PlanSession.of(source.getTextName());
         Plan plan = session == null ? new Plan("scratch") : session.plan();
         RecipeChooser chooser = new RecipeChooser(index, PreferenceStore.get());
+        // Timed because M14 gave this list a second question to answer - what the blacklist costs
+        // three items further up - and the picker re-ranks on every keystroke in its search box.
+        // A cost nobody measures is a cost nobody notices until the dialog stutters.
+        long startedAt = System.nanoTime();
         List<RecipeScorer.Scored> ranked = chooser.alternatives(key, plan);
+        double rankedMs = (System.nanoTime() - startedAt) / 1e6;
+        long excludedAt = System.nanoTime();
         java.util.Map<dev.mfp.core.model.MfpRecipe, String> excluded =
                 chooser.excludedAlternatives(key, plan);
+        double excludedMs = (System.nanoTime() - excludedAt) / 1e6;
+        double againMs;
+        {
+            long againAt = System.nanoTime();
+            chooser.alternatives(key, plan);
+            againMs = (System.nanoTime() - againAt) / 1e6;
+        }
         // Recipes the last plan's loop-avoidance pass banned. Not a property of the recipe, so it
         // comes from that expansion rather than from the chooser (ChooserResult.avoidedForCycles).
         java.util.Set<String> avoided = session == null
@@ -791,6 +804,9 @@ public final class MfpPlanCommand {
                             : ChatFormatting.WHITE);
         }
 
+        send(source, String.format(java.util.Locale.ROOT,
+                        "  ranked in %.1f ms, again in %.1f ms, excluded in %.1f ms",
+                        rankedMs, againMs, excludedMs), ChatFormatting.GRAY);
         if (!excluded.isEmpty()) {
             send(source, "  excluded, and by whom:", ChatFormatting.AQUA);
             excluded.forEach((recipe, reason) ->
