@@ -33,6 +33,7 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -728,7 +729,7 @@ public final class MfpPlanCommand {
 
         if (full) {
             send(source, "     consumes/s:", ChatFormatting.GRAY);
-            print(source, result.inputs());
+            printWithSources(source, result.inputs(), session.solveResult());
             send(source, "     produces/s:", ChatFormatting.GRAY);
             print(source, result.outputs());
             if (!result.byproducts().isEmpty()) {
@@ -802,6 +803,40 @@ public final class MfpPlanCommand {
 
     private static MfpKey parseKey(String spec) {
         return KeySpec.parse(spec);
+    }
+
+    /**
+     * The same, with where each input comes from (M13 item 1).
+     *
+     * <p>The question a planner asks of a line is "and where does that come from?", and until this
+     * existed the answer was to read all the other lines and add up. It matters most where there is
+     * more than one answer: since M10 a demand can be met partly by something the plan already makes
+     * and partly by an import, and a plan that says so is a plan the user can act on - buy the
+     * sixty, and know the forty are free.
+     *
+     * <p>Plan-wide rather than per consumer, because that is what is true. The solver balances an
+     * item across the whole plan; it does not route a particular machine's output to a particular
+     * machine's input, and printing a split as though it did would be inventing detail (plan P5).
+     */
+    private static void printWithSources(CommandSourceStack source, Map<MfpKey, Double> flows,
+                                         SolveResult solved) {
+        flows.forEach((key, amount) -> {
+            List<String> sources = new ArrayList<>();
+            for (LineResult other : solved.lines()) {
+                double made = other.outputs().getOrDefault(key, 0.0)
+                        + other.byproducts().getOrDefault(key, 0.0);
+                if (made > 0) {
+                    sources.add(trim(made) + "/s from " + other.line().recipe().id());
+                }
+            }
+            double bought = solved.rawInputs().getOrDefault(key, 0.0);
+            if (bought > 0) {
+                sources.add(trim(bought) + "/s imported");
+            }
+            send(source, "      " + trim(amount) + " x " + key
+                            + (sources.isEmpty() ? "" : "  <- " + String.join(", ", sources)),
+                    ChatFormatting.WHITE);
+        });
     }
 
     private static void print(CommandSourceStack source, Map<MfpKey, Double> flows) {
