@@ -26,6 +26,16 @@ public enum LineDecision {
      */
     STANDING_DEFAULT("your default recipe"),
 
+    /**
+     * The user added this line to eat a surplus rather than to make anything (M18).
+     *
+     * <p>Separate from {@link #RECIPE} because it answers the opposite question, and the row has to
+     * say which: a line that exists to consume something looks exactly like a line that exists to
+     * produce something, and a user who read it as the latter would go looking for the demand that
+     * put it there.
+     */
+    SINK("added to consume a surplus"),
+
     /** The user chose the machine for this recipe type; it applies to every line of the type. */
     MACHINE("machine chosen"),
 

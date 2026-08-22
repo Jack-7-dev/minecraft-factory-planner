@@ -647,7 +647,11 @@ public final class RecipeChooser {
     public ChooserResult expandInto(Plan plan) {
         ChooserResult result = expand(plan);
         result.lines().forEach(plan::add);
-        if (plan.solverMode() == SolverMode.AUTO && needsWholePlanEngine(result)) {
+        // A sink is fed from above by definition, and one downward pass can only feed a line from
+        // below (§5.1) - so a plan carrying one needs the whole-plan engine whether or not its
+        // lines happen to share a byproduct in the shape sharesAByproduct looks for.
+        if (plan.solverMode() == SolverMode.AUTO
+                && (needsWholePlanEngine(result) || !plan.sinks().isEmpty())) {
             // Derived, not chosen: a later expansion that finds no loop must be free to go back to
             // AUTO, or "needs a whole-plan engine" degrades into "once needed one".
             plan.deriveSolverMode(SolverMode.SIMPLEX);
@@ -720,7 +724,7 @@ public final class RecipeChooser {
                 // the one line the user did not choose and leave the plan's shape depending on
                 // which imports happened to be answered, which is precisely the unpredictability
                 // this mode exists to escape.
-                return expandAvoiding(plan, Set.of());
+                return placeSinks(plan, expandAvoiding(plan, Set.of()));
             }
             ChooserResult best = expandSteeringAroundPackagingLoops(plan);
             if (loopDecidedAPick) {
@@ -730,9 +734,9 @@ public final class RecipeChooser {
                 best = cheaperOfTheRateDecision(plan, best);
             }
             if (!plan.byproductFeeds()) {
-                return best;
+                return placeSinks(plan, best);
             }
-            return cheaperOfTheSplitDecision(plan, feedByproducts(plan, best));
+            return placeSinks(plan, cheaperOfTheSplitDecision(plan, feedByproducts(plan, best)));
         } finally {
             spareByproducts = Set.of();
             rateBlind = false;
@@ -741,6 +745,66 @@ public final class RecipeChooser {
             loopDecidedAPick = false;
             dedicatedFor = Map.of();
         }
+    }
+
+    /**
+     * Add the plan's sinks to a plan that has already settled (M18).
+     *
+     * <p><b>Last, and on purpose.</b> The obvious place for this is inside the walk, straight after
+     * the targets, and that is where it was until the pack said otherwise. A sink placed there is
+     * part of every candidate plan the passes above build, so its own ingredients become demands the
+     * byproduct-feeding round tries to satisfy out of leftovers — and it re-picks the <em>target's</em>
+     * chain around them. On the pack's ethylene plan, adding one consumer for hydrogen sulfide threw
+     * away the entire naphtha route in favour of an ethanol one, which does not make hydrogen
+     * sulfide at all, so the plan ended up <b>importing 200/s of the very thing the sink was added
+     * to eat</b>. That is §16.7's fault in a new place: not making something is always cheap.
+     *
+     * <p>So the rule is: <b>a sink is a decision about the leftovers, never evidence about how to
+     * make the target.</b> Everything above has finished choosing before this runs, and this changes
+     * nothing that was chosen — it adds lines and expands what those lines themselves need. The
+     * surplus therefore cannot stop being made, which is why there is no acceptance test here of the
+     * kind §11.3 needed: the failure it would be guarding against is now unreachable by construction.
+     *
+     * <p>Nothing at all happens to a plan with no sinks, which is every plan before this milestone
+     * and most plans after it. That is deliberate: the seeding below reconstructs the dependency
+     * edges from what the lines consume rather than from the walk that found them, and a plan that
+     * does not need it should not pay for it or be reordered by it.
+     */
+    private ChooserResult placeSinks(Plan plan, ChooserResult settled) {
+        if (plan.sinks().isEmpty()) {
+            return settled;
+        }
+        Expansion expansion = new Expansion(plan, Set.of(), blacklistConsequences(plan));
+        Expansion outer = active;
+        active = expansion;
+        Attempt attempt;
+        try {
+            expansion.seedFrom(settled);
+            plan.sinks().forEach(expansion::consume);
+            attempt = expansion.finish();
+        } finally {
+            active = outer;
+        }
+        return merge(settled, attempt.result());
+    }
+
+    /** The settled plan's own findings, plus whatever placing the sinks turned up. */
+    private static ChooserResult merge(ChooserResult settled, ChooserResult withSinks) {
+        List<List<String>> cycles = new ArrayList<>(settled.cycles());
+        withSinks.cycles().stream().filter(cycle -> !cycles.contains(cycle)).forEach(cycles::add);
+        Map<MfpKey, String> reasons = new LinkedHashMap<>(settled.importReasons());
+        withSinks.importReasons().forEach(reasons::putIfAbsent);
+        return new ChooserResult(withSinks.lines(), cycles,
+                union(settled.unresolved(), withSinks.unresolved()),
+                union(settled.rawMaterials(), withSinks.rawMaterials()),
+                union(settled.truncatedAt(), withSinks.truncatedAt()),
+                settled.avoidedForCycles(), Map.copyOf(reasons), settled.byproductFeeds());
+    }
+
+    private static List<MfpKey> union(List<MfpKey> first, List<MfpKey> second) {
+        Set<MfpKey> all = new LinkedHashSet<>(first);
+        all.addAll(second);
+        return List.copyOf(all);
     }
 
     /**
@@ -1807,6 +1871,163 @@ public final class RecipeChooser {
         return ceiling(plan).missingPartOf(machine);
     }
 
+    /**
+     * The ranked ways of eating a surplus, for the Byproducts tab's picker (M18).
+     *
+     * <p>The mirror of {@link #alternatives}, and it goes through {@link SinkScorer} rather than
+     * {@link RecipeScorer} for the reason that class opens with: a consumer is not a candidate for
+     * making anything, so a cost model has nothing to say about it.
+     *
+     * <p>Filtered the way an expansion would filter it, and one filter more. Hidden recipes and
+     * recipes needing a blocked item are out, exactly as they are when the plan is looking for a
+     * producer. <b>And the tier ceiling applies here whether or not it applies to a producer</b>: a
+     * machine the player cannot build is not a way to eat a surplus, and unlike a target this is
+     * never the question being asked. The refused ones come back through {@link #overTierSinks} so
+     * the screen can show them marked rather than pretend the pack has fewer consumers than it does.
+     *
+     * @param imported what the plan is currently buying, from the last solve. Not derivable here —
+     *                 the chooser knows what the plan makes, not what the solver had to import —
+     *                 and it is what separates "turns this into something you are paying for" from
+     *                 "turns this into more of something you already make".
+     */
+    public List<SinkScorer.Scored> sinks(MfpKey surplus, Plan plan, Set<MfpKey> imported) {
+        rawMaterials = plan == null ? RawMaterials.defaults() : plan.rawMaterials();
+        scoringPlan(plan);
+        return SinkScorer.rank(surplus, usableSinks(surplus, plan), sinkContext(plan, imported));
+    }
+
+    /** The consumers the ceiling refuses, and why — listed apart, never silently missing. */
+    public Map<MfpRecipe, String> overTierSinks(MfpKey surplus, Plan plan) {
+        Map<MfpRecipe, String> over = new LinkedHashMap<>();
+        if (!ceiling(plan).isOn()) {
+            return over;
+        }
+        for (MfpRecipe recipe : index.consuming(surplus)) {
+            String reason = beyondCeiling(recipe, plan);
+            if (reason != null) {
+                over.put(recipe, reason);
+            }
+        }
+        return over;
+    }
+
+    private List<MfpRecipe> usableSinks(MfpKey surplus, Plan plan) {
+        Set<String> blacklist = plan == null ? Set.of() : plan.blacklist();
+        Map<MfpKey, MfpKey> unreachable = blacklistConsequences(plan);
+        List<MfpRecipe> usable = new ArrayList<>();
+        for (MfpRecipe recipe : index.consuming(surplus)) {
+            if (blacklist.contains(recipe.id())) {
+                continue;
+            }
+            if (blockedInput(recipe, plan, unreachable) != null) {
+                continue;
+            }
+            if (beyondCeiling(recipe, plan) != null) {
+                continue;
+            }
+            usable.add(recipe);
+        }
+        return usable;
+    }
+
+    /** What {@link SinkScorer} needs to know about the plan the surplus is in. */
+    private SinkScorer.Context sinkContext(Plan plan, Set<MfpKey> imported) {
+        Set<MfpKey> wanted = new LinkedHashSet<>();
+        Set<MfpKey> produced = new LinkedHashSet<>();
+        if (plan != null) {
+            plan.targets().forEach(target -> wanted.add(target.key()));
+            for (Line line : plan.allLines()) {
+                for (MfpIngredient input : line.recipe().inputs()) {
+                    if (input.consumed() && input.effectiveAmount() > 0) {
+                        wanted.addAll(input.candidates());
+                    }
+                }
+                line.recipe().outputs().forEach(output -> produced.add(output.key()));
+            }
+        }
+        // An import is wanted by definition: the plan is buying it because something in it asked.
+        // Adding them here rather than relying on the lines is what makes a sink for a target's own
+        // ingredient rank when the plan has no line for that ingredient at all, which is every
+        // hand-built plan before it has been answered.
+        wanted.addAll(imported);
+        Set<MfpKey> raw = plan == null ? RawMaterials.defaults() : plan.rawMaterials();
+        return new SinkScorer.Context() {
+            @Override
+            public boolean wanted(MfpKey key) {
+                return wanted.contains(key);
+            }
+
+            @Override
+            public boolean imported(MfpKey key) {
+                return imported.contains(key);
+            }
+
+            @Override
+            public boolean produced(MfpKey key) {
+                return produced.contains(key);
+            }
+
+            @Override
+            public boolean raw(MfpKey key) {
+                return raw.contains(key);
+            }
+
+            @Override
+            public double consumedPerSecond(MfpRecipe recipe, MfpKey key) {
+                return RecipeChooser.this.consumedPerSecond(recipe, key);
+            }
+
+            @Override
+            public String material(MfpKey key) {
+                MaterialForm form = index.form(key);
+                return form == null ? null : form.material();
+            }
+        };
+    }
+
+    /**
+     * The same figure the sink ranking used, for the column that shows it.
+     *
+     * <p>Public so the picker cannot compute it a second way. The screen showing one number and the
+     * ranking using another would make the order on screen unexplainable from the screen itself,
+     * which is exactly the fault §17 fixed on the producing side.
+     */
+    public double consumedPerSecond(MfpRecipe recipe, MfpKey key, Plan plan) {
+        scoringPlan(plan);
+        return consumedPerSecond(recipe, key);
+    }
+
+    /**
+     * How much of {@code key} one machine running {@code recipe} eats per second.
+     *
+     * <p>The same arithmetic as {@link #outputPerSecond} with the sign reversed, sharing the same
+     * per-recipe cache of crafts per second — because the two questions differ only in which side of
+     * the recipe they read, and two caches would be two chances to disagree about how fast a machine
+     * runs.
+     */
+    private double consumedPerSecond(MfpRecipe recipe, MfpKey key) {
+        if (!recipe.hasRate()) {
+            return 0;
+        }
+        double perCraft = 0;
+        for (MfpIngredient input : recipe.inputs()) {
+            if (input.consumed() && input.effectiveAmount() > 0 && input.candidates().contains(key)) {
+                perCraft += input.effectiveAmount();
+            }
+        }
+        if (perCraft <= 0) {
+            return 0;
+        }
+        Double crafts = rateCache.get(recipe.id());
+        if (crafts == null) {
+            MachineConfig config = MachinePicker.pick(index, recipe, scoringPlan, preferences,
+                    ceiling(scoringPlan));
+            crafts = resolver.resolve(recipe, config).craftsPerSecond();
+            rateCache.put(recipe.id(), crafts);
+        }
+        return crafts <= 0 ? 0 : crafts * perCraft;
+    }
+
     public Map<MfpRecipe, String> overTierAlternatives(MfpKey key, Plan plan) {
         Map<MfpRecipe, String> over = new LinkedHashMap<>();
         if (!ceiling(plan).isOn()) {
@@ -2225,6 +2446,111 @@ public final class RecipeChooser {
             }
             path.pop();
             return recipe;
+        }
+
+        /**
+         * Start from a plan that has already been chosen, so this walk only adds to it (M18).
+         *
+         * <p>Three things are seeded and each of them says something.
+         *
+         * <ul>
+         *   <li><b>Every line is a node, already expanded</b>, so nothing here re-walks a chain
+         *       another pass settled. This walk exists to place sinks, not to have opinions.
+         *   <li><b>Every guaranteed output answers for its item.</b> A sink whose other ingredient
+         *       is something the plan already makes is plumbed into that line rather than given a
+         *       source of its own — §11.4's sibling rule, taken here for the same reason and with
+         *       the same restriction: being handed a 5% byproduct is not being supplied.
+         *   <li><b>The edges are read off what the lines consume</b>, rather than being the edges
+         *       the original walk traversed, which this does not have. That is a superset — every
+         *       edge the walk drew is a consumption — so a topological order under it is still a
+         *       correct order. Where the superset closes a cycle the walk did not have, {@link
+         *       #order()} drains early and appends in insertion order, which is the settled plan's
+         *       own order, so the worst case is no change.
+         * </ul>
+         */
+        private void seedFrom(ChooserResult settled) {
+            for (Line line : settled.lines()) {
+                MfpRecipe recipe = line.recipe();
+                nodes.put(recipe.id(), recipe);
+                expanded.add(recipe.id());
+                dependsOn.computeIfAbsent(recipe.id(), id -> new LinkedHashSet<>());
+                for (MfpOutput output : recipe.outputs()) {
+                    if (!output.isChanced() && output.amount() > 0) {
+                        chosen.putIfAbsent(output.key(), recipe);
+                    }
+                }
+            }
+            for (Line consumer : settled.lines()) {
+                for (Line producer : settled.lines()) {
+                    if (consumer == producer) {
+                        continue;
+                    }
+                    for (MfpOutput output : producer.recipe().outputs()) {
+                        if (consumer.recipe().consumes(output.key())) {
+                            dependsOn.get(consumer.recipe().id()).add(producer.recipe().id());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        /**
+         * Put a line on the plan whose job is to eat {@code surplus} (M18).
+         *
+         * <p>The mirror of {@link #resolve}, and the differences are the whole of the milestone.
+         *
+         * <ul>
+         *   <li><b>The surplus is not resolved.</b> It is already being made — that is what makes it
+         *       a surplus — so asking the index what produces it would build a second source for
+         *       something the plan is throwing away, which is the opposite of the request. The
+         *       ingredient is skipped and an edge is drawn to the line that is already making it, so
+         *       the sink is ordered above its supplier like any other consumer.
+         *   <li><b>Every other ingredient is an ordinary demand</b>, expanded from depth one, so the
+         *       raw cutoff, the ore cutoff and hand mode all apply to it. A sink that needs oxygen
+         *       raises the same question a line that needs oxygen raises, and it should raise it in
+         *       the same place.
+         *   <li><b>A stale sink is dropped in silence.</b> A recipe the pack has removed, or one
+         *       that turns out not to eat this item, adds nothing; the codec has already reported
+         *       the first case by name, and the second cannot be reached from the picker.
+         * </ul>
+         */
+        private void consume(MfpKey surplus, String recipeId) {
+            MfpRecipe recipe = index.recipe(recipeId);
+            if (recipe == null || !recipe.consumes(surplus) || nodes.containsKey(recipeId)) {
+                return;
+            }
+            nodes.put(recipeId, recipe);
+            dependsOn.computeIfAbsent(recipeId, id -> new LinkedHashSet<>());
+            expanded.add(recipeId);
+
+            MfpRecipe supplier = nodeProducing(surplus);
+            if (supplier != null && !supplier.id().equals(recipeId)) {
+                dependsOn.get(recipeId).add(supplier.id());
+            }
+
+            path.push(recipeId);
+            for (MfpIngredient input : recipe.inputs()) {
+                if (!input.consumed() || input.effectiveAmount() <= 0
+                        || input.candidates().contains(surplus)) {
+                    continue;
+                }
+                MfpRecipe producer = resolve(chosenCandidate(input), 1);
+                if (producer != null && !producer.id().equals(recipeId)) {
+                    dependsOn.get(recipeId).add(producer.id());
+                }
+            }
+            path.pop();
+        }
+
+        /** A line already on the plan that makes {@code key}, chanced outputs included. */
+        private MfpRecipe nodeProducing(MfpKey key) {
+            for (MfpRecipe candidate : nodes.values()) {
+                if (candidate.produces(key)) {
+                    return candidate;
+                }
+            }
+            return null;
         }
 
         /**

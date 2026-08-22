@@ -1130,10 +1130,28 @@ public final class PlannerScreen extends Screen {
      * not trying to make.
      */
     private void openRecipePicker(MfpRecipe recipe, LineResult result) {
+        // A sink opens the screen that put it here (M18), not the one that would offer other ways to
+        // make what it happens to give off. The decision behind this line is "something should eat
+        // that surplus", and the recipe picker cannot express changing it or taking it back.
+        MfpKey eats = sunkBy(recipe);
+        if (eats != null) {
+            Minecraft.getInstance().setScreen(new SinkPickerScreen(this, eats));
+            return;
+        }
         MfpKey key = producedFor(recipe, result);
         if (key != null) {
             Minecraft.getInstance().setScreen(new RecipePickerScreen(this, key));
         }
+    }
+
+    /** The surplus this line was added to eat, or null if it was not added for that. */
+    private MfpKey sunkBy(MfpRecipe recipe) {
+        for (Map.Entry<MfpKey, String> entry : plan.plan().sinks().entrySet()) {
+            if (entry.getValue().equals(recipe.id())) {
+                return entry.getKey();
+            }
+        }
+        return null;
     }
 
     /**
@@ -1335,12 +1353,21 @@ public final class PlannerScreen extends Screen {
         // What the marker bar on this row means, spelled out: a colour says "you decided something
         // here" and nothing more, and which decision it was is the thing worth knowing.
         for (LineDecision decision : plan.plan().decisionsFor(line, PreferenceStore.get())) {
-            lines.add(Component.literal(decision == LineDecision.STANDING_DEFAULT
-                            ? decision.label() + ", from Defaults"
-                            : decision.label() + " by you")
+            lines.add(Component.literal(switch (decision) {
+                        case STANDING_DEFAULT -> decision.label() + ", from Defaults";
+                        // Not "by you" like the rest: this line is here to eat something rather
+                        // than to make anything, and a row that read "added to consume a surplus by
+                        // you" would leave the reader hunting for the demand that put it there.
+                        case SINK -> decision.label() + " - it is not here to make anything";
+                        default -> decision.label() + " by you";
+                    })
                     .withStyle(ChatFormatting.AQUA));
         }
-        lines.add(Component.literal("click for every other way to make this")
+        MfpKey eats = sunkBy(recipe);
+        lines.add(Component.literal(eats == null
+                        ? "click for every other way to make this"
+                        : "click for every other way to eat "
+                                + KeyStacks.name(eats).getString())
                 .withStyle(ChatFormatting.GRAY));
         return lines;
     }
@@ -1397,11 +1424,43 @@ public final class PlannerScreen extends Screen {
         // The plan-level tabs are never per machine: "the plan imports 4 ore a second" is a fact
         // about the plan, and dividing it by some line's machine count would mean nothing.
         return switch (selectedTab) {
-            case 1 -> slotsFor(solved.byproducts(), 1.0);
+            case 1 -> byproductSlots(solved.byproducts());
             case 2 -> importSlots(solved.rawInputs());
             case 3 -> machineSlots(solved);
             default -> slotsFor(solved.products(), 1.0);
         };
+    }
+
+    /**
+     * The surplus, each item clickable if anything in the pack eats it (M18).
+     *
+     * <p>The mirror of {@link #importSlots}, and the tab's first gesture of any kind. It listed what
+     * the factory throws away and stopped there — the one plan-level tab that asked a question and
+     * offered no way to answer it, while the Imports tab beside it has been answerable since M11.2.
+     *
+     * <p>Inert where nothing consumes the item, for the same reason an import with no recipes is
+     * inert: a picker that opens on an empty list reads as a broken screen rather than as an answer.
+     * An item already being eaten still opens — that is how the choice is changed or taken back —
+     * and it is only in this list at all if the sink does not eat all of it.
+     */
+    private List<SlotWidget> byproductSlots(Map<MfpKey, Double> byproducts) {
+        List<SlotWidget> slots = new ArrayList<>();
+        byproducts.entrySet().stream()
+                .filter(entry -> entry.getKey().kind() != MfpKey.Kind.ENERGY)
+                .sorted(Comparator.comparingDouble((Map.Entry<MfpKey, Double> e) -> -e.getValue()))
+                .forEach(entry -> {
+                    MfpKey key = entry.getKey();
+                    SlotWidget slot = SlotWidget.flow(key, entry.getValue(), timescale);
+                    if (!ClientIndex.get().consuming(key).isEmpty()) {
+                        slot.onClick(() -> Minecraft.getInstance().setScreen(
+                                        new SinkPickerScreen(this, key)),
+                                plan.plan().sink(key) == null
+                                        ? "click to find something that eats this"
+                                        : "eaten by a line already - click to change or stop");
+                    }
+                    slots.add(slot);
+                });
+        return slots;
     }
 
     /**

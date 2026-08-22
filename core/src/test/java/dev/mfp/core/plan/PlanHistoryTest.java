@@ -86,6 +86,26 @@ class PlanHistoryTest {
     }
 
     @Test
+    @DisplayName("adding a consumer for a surplus is one step, and undo takes it back (M18)")
+    void answeringASurplusIsUndoable() {
+        Plan plan = plan();
+        PlanHistory history = started(plan);
+        String before = PlanExport.export(plan);
+
+        plan.consumeWith(PLATE, "mfp:eat_plates");
+        assertTrue(history.record(plan), "the milestone's one new mutator files a step");
+
+        assertTrue(history.undo(plan));
+        assertEquals(before, PlanExport.export(plan));
+        assertTrue(plan.sinks().isEmpty());
+
+        // And forwards again, because the point of the mirror is that it behaves like the pin it
+        // mirrors: nothing about a sink is a special case for the history.
+        assertTrue(history.redo(plan));
+        assertEquals("mfp:eat_plates", plan.sink(PLATE));
+    }
+
+    @Test
     @DisplayName("redo puts the edit back, and a new edit throws the redo branch away")
     void redoAndBranching() {
         Plan plan = plan();
@@ -264,6 +284,7 @@ class PlanHistoryTest {
                 "rawMaterial", "clearRawMaterial",
                 "preferItem", "clearPreferredItem",
                 "chooseRecipe", "clearRecipeChoice",
+                "consumeWith", "clearSink",
                 "chooseMachine",
                 "configureMachine", "clearMachineConfig",
                 "blacklistRecipe", "unblacklistRecipe",

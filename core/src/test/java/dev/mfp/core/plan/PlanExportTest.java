@@ -88,6 +88,10 @@ class PlanExportTest {
                 .autoResolve(false)
                 .displayOrder(List.of("mfp:ingot", "mfp:plate"))
                 .chooseRecipe(INGOT, "mfp:ingot")
+                // The mirror of the pin above (M18), and in this fixture for the same reason: a
+                // decision keyed by an item the plan is *giving off* rather than making would be
+                // lost by a codec that only knew about the one map.
+                .consumeWith(COBBLE, "mfp:ingot_alt")
                 .chooseMachine("mfp:machine", "mfp:mv_machine")
                 .solverMode(SolverMode.SEQUENTIAL);
         plan.configureMachine("mfp:ingot",
@@ -129,6 +133,7 @@ class PlanExportTest {
                 + "plan that re-expanded on import would bury every choice in it");
         assertEquals(original.displayOrder(), copy.displayOrder());
         assertEquals(original.recipeChoices(), copy.recipeChoices());
+        assertEquals(original.sinks(), copy.sinks());
         assertEquals(original.machineChoices(), copy.machineChoices());
         assertEquals(original.machineConfigs(), copy.machineConfigs());
         assertEquals(SolverMode.SEQUENTIAL, copy.solverMode());
@@ -145,7 +150,8 @@ class PlanExportTest {
     @Test
     @DisplayName("an import naming a recipe this world lacks says which, and still opens")
     void unknownRecipesAreReportedRatherThanFatal() {
-        Plan plan = new Plan("elsewhere").target(PLATE, 1).chooseRecipe(PLATE, "otherpack:fancy_plate");
+        Plan plan = new Plan("elsewhere").target(PLATE, 1).chooseRecipe(PLATE, "otherpack:fancy_plate")
+                .consumeWith(ORE, "otherpack:fancy_disposal");
         plan.configureMachine("otherpack:fancy_plate", MachineConfig.of("otherpack:machine", 3));
 
         RecipeIndex index = index();
@@ -157,7 +163,10 @@ class PlanExportTest {
                 "the message names the recipe: " + imported.problems());
         // The pin is dropped rather than kept as an id nothing can act on, and the rest of the plan
         // is intact - which is the whole reason an unknown recipe is not a refusal.
+        assertTrue(imported.problems().stream().anyMatch(p -> p.contains("otherpack:fancy_disposal")),
+                "and the sink is dropped by name too: " + imported.problems());
         assertNull(imported.plan().recipeChoice(PLATE));
+        assertTrue(imported.plan().sinks().isEmpty());
         assertTrue(imported.plan().machineConfigs().isEmpty());
         assertEquals(1, imported.plan().targets().size());
         assertTrue(solve(index, imported.plan()).isComplete());

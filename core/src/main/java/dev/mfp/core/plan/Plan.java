@@ -30,6 +30,7 @@ public final class Plan {
     private Set<MfpKey> rawMaterialCacheBase;
     private final Set<MfpKey> preferredItems = new LinkedHashSet<>();
     private final Map<MfpKey, String> recipeChoices = new LinkedHashMap<>();
+    private final Map<MfpKey, String> sinks = new LinkedHashMap<>();
     private final Map<String, String> machineChoices = new LinkedHashMap<>();
     private final Map<String, MachineConfig> machineConfigs = new LinkedHashMap<>();
     private final Set<String> blacklist = new LinkedHashSet<>();
@@ -293,6 +294,39 @@ public final class Plan {
     }
 
     /**
+     * Recipes the user chose to eat a surplus, by the item they eat (M18).
+     *
+     * <p>The mirror of {@link #recipeChoices()}, and deliberately a second map rather than an entry
+     * in that one. A pin answers "what makes this?" and is keyed by the item the recipe
+     * <em>produces</em>; a sink answers "what could eat this?" and is keyed by the item the recipe
+     * <em>consumes</em>. One map would have to guess which of the two questions a key was asked in,
+     * and both can be asked about the same item at once — a plan that makes oxygen and has too much
+     * of it is the ordinary case rather than a corner one.
+     *
+     * <p>One sink per item, replaced rather than accumulated: a second answer to "what eats this
+     * hydrogen sulfide" is a change of mind, not a second factory.
+     */
+    public Map<MfpKey, String> sinks() {
+        return Map.copyOf(sinks);
+    }
+
+    /** Put a line on the plan whose job is to consume {@code key}. */
+    public Plan consumeWith(MfpKey key, String recipeId) {
+        sinks.put(key, recipeId);
+        return this;
+    }
+
+    public String sink(MfpKey key) {
+        return sinks.get(key);
+    }
+
+    /** Stop eating this surplus; the plan goes back to throwing it away. */
+    public Plan clearSink(MfpKey key) {
+        sinks.remove(key);
+        return this;
+    }
+
+    /**
      * Machines the user picked per recipe type.
      *
      * <p>Keyed by recipe type rather than by line, so that choosing an HV assembler once applies to
@@ -534,6 +568,9 @@ public final class Plan {
         if (recipeChoices.containsValue(line.recipe().id())) {
             decisions.add(LineDecision.RECIPE);
         }
+        if (sinks.containsValue(line.recipe().id())) {
+            decisions.add(LineDecision.SINK);
+        }
         if (machineChoices.containsKey(line.recipe().recipeTypeId())) {
             decisions.add(LineDecision.MACHINE);
         }
@@ -594,6 +631,7 @@ public final class Plan {
         copy.invalidateRawMaterials();
         copy.preferredItems.addAll(preferredItems);
         copy.recipeChoices.putAll(recipeChoices);
+        copy.sinks.putAll(sinks);
         copy.machineChoices.putAll(machineChoices);
         copy.machineConfigs.putAll(machineConfigs);
         copy.blacklist.addAll(blacklist);
@@ -672,6 +710,8 @@ public final class Plan {
         preferredItems.addAll(snapshot.preferredItems);
         recipeChoices.clear();
         recipeChoices.putAll(snapshot.recipeChoices);
+        sinks.clear();
+        sinks.putAll(snapshot.sinks);
         machineChoices.clear();
         machineChoices.putAll(snapshot.machineChoices);
         machineConfigs.clear();

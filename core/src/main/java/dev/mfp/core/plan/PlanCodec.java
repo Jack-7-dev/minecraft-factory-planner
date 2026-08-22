@@ -114,6 +114,14 @@ public final class PlanCodec {
         plan.recipeChoices().forEach((key, recipeId) -> recipeChoices.addProperty(KeySpec.of(key), recipeId));
         json.add("recipeChoices", recipeChoices);
 
+        // The other half of the same decision (M18): what the plan was told to eat, keyed by the
+        // item it eats. Written unconditionally like the pins rather than only when non-empty,
+        // because an empty object and an absent one read the same and the reader is lenient either
+        // way — and because a sink dropped on reload would silently give the surplus back.
+        JsonObject sinks = new JsonObject();
+        plan.sinks().forEach((key, recipeId) -> sinks.addProperty(KeySpec.of(key), recipeId));
+        json.add("sinks", sinks);
+
         JsonObject machineChoices = new JsonObject();
         plan.machineChoices().forEach(machineChoices::addProperty);
         json.add("machineChoices", machineChoices);
@@ -253,6 +261,15 @@ public final class PlanCodec {
             } else {
                 problems.report("no recipe '" + recipeId + "' here, so the pin on "
                         + entry.getKey() + " was dropped");
+            }
+        });
+        object(json, "sinks").entrySet().forEach(entry -> {
+            String recipeId = entry.getValue().getAsString();
+            if (knownRecipe.test(recipeId)) {
+                plan.consumeWith(KeySpec.parse(entry.getKey()), recipeId);
+            } else {
+                problems.report("no recipe '" + recipeId + "' here, so nothing eats "
+                        + entry.getKey() + " any more");
             }
         });
         object(json, "machineChoices").entrySet().forEach(entry ->

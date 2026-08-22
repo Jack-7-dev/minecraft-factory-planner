@@ -167,6 +167,17 @@ public final class MfpPlanCommand {
         root.then(Commands.literal("redo")
                 .executes(ctx -> step(ctx.getSource(), false)));
 
+        // The mirror of `pin`, for the other question a plan raises (M18). `mfp sink <item>` ranks
+        // the ways of eating a surplus and prints them with their reasons - the headless form of
+        // clicking a byproduct - and a second argument commits one and re-solves. Both halves are
+        // here because the ranking is the part of this milestone that is not a screen, and a
+        // ranking nobody can print is a ranking nobody can check.
+        root.then(Commands.literal("sink")
+                .executes(ctx -> sinks(ctx.getSource()))
+                .then(Commands.argument("spec", StringArgumentType.greedyString())
+                        .executes(ctx -> sink(ctx.getSource(),
+                                StringArgumentType.getString(ctx, "spec")))));
+
         root.then(Commands.literal("alternatives")
                 .then(Commands.argument("item", StringArgumentType.greedyString())
                         .executes(ctx -> alternatives(ctx.getSource(),
@@ -867,6 +878,155 @@ public final class MfpPlanCommand {
                 print(source, result.byproducts());
             }
         }
+    }
+
+    // ----------------------------------------------------------------- sinks
+
+    /** {@code /mfp sink} — what this plan has been told to eat, and how to say so. */
+    private static int sinks(CommandSourceStack source) {
+        PlanSession session = PlanSession.of(source.getTextName());
+        if (session == null) {
+            send(source, "MFP: no plan yet - run /mfp plan first", ChatFormatting.RED);
+            return 0;
+        }
+        Map<MfpKey, String> chosen = session.plan().sinks();
+        if (chosen.isEmpty()) {
+            send(source, "MFP: nothing in this plan eats a surplus", ChatFormatting.GRAY);
+            send(source, "  /mfp sink <item>              rank the ways of eating it",
+                    ChatFormatting.GRAY);
+            send(source, "  /mfp sink <item> <recipe id>  add that consumer, and re-solve",
+                    ChatFormatting.GRAY);
+            send(source, "  /mfp sink clear [item]        drop one, or all of them",
+                    ChatFormatting.GRAY);
+            return 1;
+        }
+        send(source, chosen.size() + " surplus/es being eaten", ChatFormatting.GOLD);
+        chosen.forEach((key, recipeId) ->
+                send(source, "  " + KeySpec.of(key) + " -> " + recipeId, ChatFormatting.WHITE));
+        return 1;
+    }
+
+    /**
+     * {@code /mfp sink <item> [recipe id]}, and {@code /mfp sink clear [item]}.
+     *
+     * <p>With one argument this ranks and prints; with two it commits. The split is deliberate and
+     * is not the split {@code pin} uses: a pin is usually made against a recipe the user already has
+     * in mind, while a sink is a question — <em>what could eat this?</em> — whose whole value is the
+     * answer being ranked. Printing the ranking first is therefore the common case rather than a
+     * diagnostic, and it is why this reads more like {@code alternatives} than like {@code pin}.
+     *
+     * <p>The recipe is checked against the item before it is stored, for the same reason
+     * {@link #pin} checks its own: a sink that does not consume what it is filed under is dropped in
+     * silence by the walk, and a silent no-op is the worst answer a command can give.
+     */
+    private static int sink(CommandSourceStack source, String spec) {
+        PlanSession session = PlanSession.of(source.getTextName());
+        if (session == null) {
+            send(source, "MFP: no plan to add to yet - run /mfp plan first", ChatFormatting.RED);
+            return 0;
+        }
+        RecipeIndex index = MfpIndexHolder.get(source.getServer());
+        Plan plan = session.plan();
+        String[] parts = spec.trim().split("\\s+");
+
+        if (parts[0].equalsIgnoreCase("clear")) {
+            if (parts.length == 1) {
+                int had = plan.sinks().size();
+                plan.sinks().keySet().forEach(plan::clearSink);
+                send(source, "MFP: cleared " + had + " sink(s)", ChatFormatting.GREEN);
+            } else {
+                MfpKey key = parseKey(parts[1]);
+                plan.clearSink(key);
+                send(source, "MFP: " + KeySpec.of(key) + " goes back in the bin", ChatFormatting.GREEN);
+            }
+            return choose(source, index, plan);
+        }
+
+        MfpKey key = parseKey(parts[0]);
+        if (parts.length == 1) {
+            return rankSinks(source, index, plan, session, key);
+        }
+
+        String recipeId = parts[1];
+        MfpRecipe recipe = index.recipe(recipeId);
+        if (recipe == null) {
+            send(source, "MFP: no indexed recipe with id '" + recipeId + "'", ChatFormatting.RED);
+            return 0;
+        }
+        if (!recipe.consumes(key)) {
+            send(source, "MFP: " + recipeId + " does not consume " + KeySpec.of(key)
+                    + " - it eats " + recipe.inputs().stream().map(i -> KeySpec.of(i.primary())).toList(),
+                    ChatFormatting.RED);
+            return 0;
+        }
+
+        plan.consumeWith(key, recipeId);
+        send(source, "MFP: " + KeySpec.of(key) + " -> " + recipeId, ChatFormatting.GREEN);
+        return choose(source, index, plan);
+    }
+
+    /**
+     * The ranked ways of eating one item, with the reasons the ranking gives.
+     *
+     * <p>Printed the way {@link #alternatives} prints a producer ranking, and read the same way: the
+     * gap between two scores is the question, and a list with no numbers on it cannot say whether
+     * the first answer beat the second by a mile or by a hair.
+     */
+    private static int rankSinks(CommandSourceStack source, RecipeIndex index, Plan plan,
+                                 PlanSession session, MfpKey key) {
+        RecipeChooser chooser = new RecipeChooser(index, PreferenceStore.get())
+                .withResolver(PlanSession.resolverFor(index));
+        java.util.Set<MfpKey> imported = session.solveResult().rawInputs().keySet();
+        // Timed twice, like `alternatives`, and for the same reason: the picker rebuilds on every
+        // keystroke in its search box, so the number that matters is the second one. The first pays
+        // for the tier ceiling's index-wide seed pass, which the dialog pays once and holds.
+        long startedAt = System.nanoTime();
+        List<dev.mfp.core.select.SinkScorer.Scored> ranked = chooser.sinks(key, plan, imported);
+        double ms = (System.nanoTime() - startedAt) / 1e6;
+        long againAt = System.nanoTime();
+        chooser.sinks(key, plan, imported);
+        double againMs = (System.nanoTime() - againAt) / 1e6;
+        Map<MfpRecipe, String> overTier = chooser.overTierSinks(key, plan);
+
+        double surplus = session.solveResult().byproducts().getOrDefault(key, 0.0);
+        if (ranked.isEmpty()) {
+            send(source, "MFP: nothing usable consumes " + KeySpec.of(key), ChatFormatting.RED);
+            if (!overTier.isEmpty()) {
+                send(source, "  " + overTier.size() + " consumer(s) are above the tier you build at",
+                        ChatFormatting.YELLOW);
+                overTier.forEach((recipe, reason) ->
+                        send(source, "    " + recipe.id() + " - " + reason, ChatFormatting.GRAY));
+            }
+            return 0;
+        }
+
+        send(source, ranked.size() + " way(s) to eat " + KeySpec.of(key) + ", best first"
+                        + (surplus > 0
+                                ? String.format(java.util.Locale.ROOT,
+                                        "  (this plan throws away %.3f/s)", surplus)
+                                : ""),
+                ChatFormatting.GOLD);
+        int shown = 0;
+        for (dev.mfp.core.select.SinkScorer.Scored scored : ranked) {
+            if (shown++ >= 15) {
+                send(source, "  ... and " + (ranked.size() - 15) + " more", ChatFormatting.GRAY);
+                break;
+            }
+            send(source, "  " + String.format(java.util.Locale.ROOT, "%7.1f", scored.score())
+                            + "  " + scored.recipe().id() + "  " + scored.reasons(),
+                    shown == 1 ? ChatFormatting.GREEN : ChatFormatting.WHITE);
+        }
+        send(source, String.format(java.util.Locale.ROOT, "  ranked in %.1f ms, again in %.1f ms",
+                ms, againMs), ChatFormatting.GRAY);
+        if (!overTier.isEmpty()) {
+            // Named rather than merely absent, for M17's own reason: a filter this broad has to be
+            // visible, or the pack looks as though it had fewer consumers than it has.
+            send(source, "  " + overTier.size() + " more above the tier you build at, not offered",
+                    ChatFormatting.YELLOW);
+        }
+        send(source, "  /mfp sink " + KeySpec.of(key) + " <recipe id>  to add one",
+                ChatFormatting.GRAY);
+        return ranked.size();
     }
 
     // ---------------------------------------------------------- alternatives
