@@ -35,6 +35,24 @@ public interface MfpRecipeSink {
     default void form(MfpKey key, MaterialForm form) {}
 
     /**
+     * Record that an item is a <em>tiered component</em>: one of the ten cover parts or a circuit,
+     * whose tier is a gate rather than a cost (M17).
+     *
+     * <p>The distinction this exists for. Everything else MFP knows about tier is a voltage — what a
+     * recipe needs, what a machine supplies — and a voltage can be paid for with a bigger hatch. A
+     * GregTech component's tier is not that. An IV emitter has a shaped crafting recipe, so a rule
+     * that asks only "is there a recipe at or below your tier whose inputs you can make" concludes
+     * that a player at HV can hand-craft one, which is false: the tier is in the item, not in the
+     * recipe that assembles it.
+     *
+     * <p>Optional, and answered by no provider without such data — a pack with no GregTech simply
+     * has no components and the gate applies to nothing.
+     *
+     * @param tier the voltage tier of the component, {@code 0} for ULV
+     */
+    default void componentTier(MfpKey key, int tier) {}
+
+    /**
      * Record that a recipe could not be converted.
      *
      * @param id     the recipe's identifier in its source mod, so it can be looked up

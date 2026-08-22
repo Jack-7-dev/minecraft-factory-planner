@@ -16,6 +16,7 @@ import dev.mfp.core.plan.Line;
 import dev.mfp.core.plan.MachineConfig;
 import dev.mfp.core.plan.Plan;
 import dev.mfp.core.plan.PlanExport;
+import dev.mfp.core.plan.Preferences;
 import dev.mfp.core.plan.SolverMode;
 import dev.mfp.core.plan.TargetOutput;
 import dev.mfp.core.select.ChooserResult;
@@ -79,6 +80,14 @@ public final class MfpPlanCommand {
         root.then(Commands.literal("byproducts")
                 .then(Commands.argument("state", StringArgumentType.word())
                         .executes(ctx -> byproducts(ctx.getSource(),
+                                StringArgumentType.getString(ctx, "state")))));
+
+        // The tier ceiling off and on (M17), for the same reason: a filter this broad has to be
+        // shown to be off when it is off, and the only way to say what it cost is to diff the same
+        // target with it both ways in one session.
+        root.then(Commands.literal("ceiling")
+                .then(Commands.argument("state", StringArgumentType.word())
+                        .executes(ctx -> ceiling(ctx.getSource(),
                                 StringArgumentType.getString(ctx, "state")))));
 
         // Hand-built plans, headlessly (M11.3). The GUI's version of this is a toggle in Settings and
@@ -187,6 +196,7 @@ public final class MfpPlanCommand {
         // because it is the one a headless check uses.
         Plan plan = new Plan().target(key, perSecond)
                 .byproductFeeds(byproductFeeds)
+                .tierCeiling(tierCeiling)
                 .autoResolve(autoResolve());
         return choose(source, index, plan);
     }
@@ -362,6 +372,21 @@ public final class MfpPlanCommand {
         byproductFeeds = !state.equalsIgnoreCase("off") && !state.equalsIgnoreCase("false");
         send(source, "MFP: byproduct feeding is " + (byproductFeeds ? "on" : "off")
                 + " for every plan from here", ChatFormatting.GRAY);
+        return 1;
+    }
+
+    /** Whether the stated tier is a requirement for plans from here (M17). On, like the plan. */
+    private static boolean tierCeiling = true;
+
+    private static int ceiling(CommandSourceStack source, String state) {
+        tierCeiling = !state.equalsIgnoreCase("off") && !state.equalsIgnoreCase("false");
+        int tier = PreferenceStore.get().defaultTier();
+        send(source, "MFP: the tier you build at is " + (tierCeiling ? "a requirement" : "a preference")
+                + " for every plan from here"
+                + (tier == Preferences.NO_DEFAULT_TIER
+                        ? " - but no tier is set, so it changes nothing"
+                        : " (tier " + tier + ")"),
+                ChatFormatting.GRAY);
         return 1;
     }
 
@@ -668,8 +693,17 @@ public final class MfpPlanCommand {
                 + solved.engine().name().toLowerCase(java.util.Locale.ROOT) + " engine"
                 + ", confidence " + solved.confidence(), ChatFormatting.GRAY);
 
+        // A line above the stated tier can only be here because the user asked for it - a pin, a
+        // standing default, or the target itself - and it says so rather than passing for buildable.
+        RecipeChooser ceilingCheck =
+                new RecipeChooser(MfpIndexHolder.get(source.getServer()), PreferenceStore.get());
         send(source, "  production:", ChatFormatting.AQUA);
-        solved.lines().forEach(line -> send(source, "    " + describe(line), lineColour(line)));
+        solved.lines().forEach(line -> {
+            String beyond = ceilingCheck.beyondCeiling(line.line().recipe(), plan);
+            send(source, "    " + describe(line)
+                    + (beyond == null ? "" : "  [above your tier: " + beyond + "]"),
+                    beyond == null ? lineColour(line) : ChatFormatting.YELLOW);
+        });
 
         if (!solved.rawInputs().isEmpty()) {
             send(source, "  imports per second:", ChatFormatting.AQUA);
@@ -874,6 +908,12 @@ public final class MfpPlanCommand {
         java.util.Set<String> avoided = session == null
                 ? java.util.Set.of()
                 : java.util.Set.copyOf(session.chooserResult().avoidedForCycles());
+        // Still listed, and marked (M17). A tier ceiling refuses more recipes at once than every
+        // other rule put together, so hiding them would make the picker look like the pack shrank.
+        java.util.Map<dev.mfp.core.model.MfpRecipe, String> overTier =
+                chooser.overTierAlternatives(key, plan);
+        java.util.Map<String, String> overTierById = new java.util.LinkedHashMap<>();
+        overTier.forEach((recipe, reason) -> overTierById.put(recipe.id(), reason));
 
         if (ranked.isEmpty() && excluded.isEmpty()) {
             send(source, "MFP: nothing in the index produces " + key, ChatFormatting.RED);
@@ -894,9 +934,15 @@ public final class MfpPlanCommand {
             send(source, "  " + String.format(java.util.Locale.ROOT, "%7.1f", scored.score())
                             + "  " + scored.recipe().id()
                             + (avoided.contains(scored.recipe().id()) ? "  [avoided for a loop]" : "")
+                            + (overTierById.containsKey(scored.recipe().id())
+                                    ? "  [above your tier: " + overTierById.get(scored.recipe().id()) + "]"
+                                    : "")
                             + "  " + scored.reasons(),
-                    shown == 1 ? ChatFormatting.GREEN
-                            : avoided.contains(scored.recipe().id()) ? ChatFormatting.YELLOW
+                    shown == 1 && !overTierById.containsKey(scored.recipe().id())
+                            ? ChatFormatting.GREEN
+                            : avoided.contains(scored.recipe().id())
+                                    || overTierById.containsKey(scored.recipe().id())
+                            ? ChatFormatting.YELLOW
                             : ChatFormatting.WHITE);
         }
 

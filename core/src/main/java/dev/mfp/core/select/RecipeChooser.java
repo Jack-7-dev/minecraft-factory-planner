@@ -1,5 +1,6 @@
 package dev.mfp.core.select;
 
+import dev.mfp.core.behaviour.GtTiers;
 import dev.mfp.core.index.RecipeIndex;
 import dev.mfp.core.model.MaterialForm;
 import dev.mfp.core.model.MaterialForms;
@@ -64,7 +65,7 @@ public final class RecipeChooser {
      * blacklisted item can poison: inferium to air essence to wood essence to oak log is three. Six
      * is generous for the shape these have in practice and keeps a pathological graph bounded.
      */
-    private static final int MAX_BLOCK_ROUNDS = 6;
+    static final int MAX_BLOCK_ROUNDS = 6;
 
     /**
      * How many times to re-expand offering the previous plan's leftovers (M11.1).
@@ -144,6 +145,29 @@ public final class RecipeChooser {
 
     /** The blacklist those consequences were worked out from, so a changed one is noticed. */
     private String consequencesFor;
+
+    /** @see #blacklistRule */
+    private Unavailability.Rule blacklistRule;
+
+    /** @see #ceiling */
+    private TierCeiling ceiling;
+
+    /** What {@link #ceiling} was built for, so a changed one is noticed. Fields, not a signature
+     *  string: this is asked once per candidate recipe, and building a string there is a cost the
+     *  walk pays a hundred thousand times over. */
+    private Plan ceilingPlan;
+    private int ceilingTier;
+    private boolean ceilingSwitch;
+    private int ceilingHidden;
+
+    /** @see #tierConsequences */
+    private Map<MfpKey, MfpKey> tierConsequences = Map.of();
+
+    /** The ceiling those consequences belong to, by identity. */
+    private TierCeiling tierConsequencesFor;
+
+    /** The plan {@link #blacklistRule} was built for, by identity. */
+    private Plan ruleFor;
 
     private Set<MfpKey> producedIgnoringVariant;
 
@@ -315,7 +339,7 @@ public final class RecipeChooser {
         }
         Double crafts = rateCache.get(recipe.id());
         if (crafts == null) {
-            MachineConfig config = MachinePicker.pick(index, recipe, scoringPlan, preferences);
+            MachineConfig config = MachinePicker.pick(index, recipe, scoringPlan, preferences, ceiling(scoringPlan));
             crafts = resolver.resolve(recipe, config).craftsPerSecond();
             rateCache.put(recipe.id(), crafts);
         }
@@ -1740,7 +1764,8 @@ public final class RecipeChooser {
                 excluded.put(recipe, "never actually yields " + key);
                 continue;
             }
-            Unavailable offender = unavailableInput(recipe, plan, blacklistConsequences(plan));
+            Unavailability.Unavailable offender =
+                    unavailableInput(recipe, plan, blacklistConsequences(plan));
             if (offender != null) {
                 excluded.put(recipe, offender.input().equals(offender.cause())
                         ? "needs " + offender.input() + ", which is blacklisted"
@@ -1749,6 +1774,51 @@ public final class RecipeChooser {
             }
         }
         return excluded;
+    }
+
+    /**
+     * Every recipe for {@code key} the tier ceiling would refuse, and why, in words (M17).
+     *
+     * <p>Deliberately not folded into {@link #excludedAlternatives}: these recipes are still ranked
+     * and still listed. §12's rule is that a recipe the chooser refused stays visible with a reason
+     * or the user has no way to change their mind, and a tier ceiling refuses more recipes at once
+     * than every other rule put together — hiding them would make the picker look like the pack had
+     * shrunk. So the picker shows them marked, and clicking one pins it, which outranks the ceiling.
+     */
+    /**
+     * The machine and tier a line for this recipe would get, judged against the ceiling (M17).
+     *
+     * <p>{@link MachinePicker#pick} without a ceiling is the honest answer for a caller that has no
+     * plan; a screen previewing what a line <em>would</em> be has one, and showing a throughput
+     * computed on a machine the plan will not use is the same fault as offering it.
+     */
+    public MachineConfig pickMachine(MfpRecipe recipe, Plan plan) {
+        return MachinePicker.pick(index, recipe, plan, preferences, ceiling(plan));
+    }
+
+    /**
+     * The part in the way of building this machine at the tier the plan builds at, or null (M17).
+     *
+     * <p>Public so that a screen or a listing offering machines can agree with the plan that just
+     * refused one. A default MFP declares unbuildable and then offers in a dropdown is worse than
+     * either answer alone.
+     */
+    public MfpKey missingPartOf(MfpMachine machine, Plan plan) {
+        return ceiling(plan).missingPartOf(machine);
+    }
+
+    public Map<MfpRecipe, String> overTierAlternatives(MfpKey key, Plan plan) {
+        Map<MfpRecipe, String> over = new LinkedHashMap<>();
+        if (!ceiling(plan).isOn()) {
+            return over;
+        }
+        for (MfpRecipe recipe : index.producing(key)) {
+            String reason = beyondCeiling(recipe, plan);
+            if (reason != null) {
+                over.put(recipe, reason);
+            }
+        }
+        return over;
     }
 
     public Map<MfpRecipe, MfpKey> blockedAlternatives(MfpKey key, Plan plan) {
@@ -1775,54 +1845,141 @@ public final class RecipeChooser {
     }
 
     /**
+     * The tier this plan builds at, as a requirement (M17).
+     *
+     * <p>Cached on the plan and the tier rather than the plan alone, because a tier is the one
+     * standing preference a player changes to see what happens: {@code mfp defaults tier} in a
+     * session, or the Defaults screen. The seed pass behind it walks the whole index once, so a
+     * ceiling that recomputed per key would be paid for on every candidate of every recipe.
+     */
+    private TierCeiling ceiling(Plan plan) {
+        int tier = preferences.defaultTierFor(plan);
+        boolean on = plan == null || plan.tierCeiling();
+        int hidden = plan == null ? 0 : plan.blacklist().size();
+        if (ceiling != null && ceilingPlan == plan && ceilingTier == tier
+                && ceilingSwitch == on && ceilingHidden == hidden) {
+            return ceiling;
+        }
+        ceiling = new TierCeiling(index, plan, tier);
+        ceilingPlan = plan;
+        ceilingTier = tier;
+        ceilingSwitch = on;
+        ceilingHidden = hidden;
+        return ceiling;
+    }
+
+    /**
+     * Every item this plan's tier ceiling leaves unmakeable, and the item each one blames.
+     *
+     * <p>Fault 4 of M17: refusing a recipe without following the consequence leaves the walk to meet
+     * the same wall three items further up and report it as a mystery. It is the blacklist's
+     * propagation exactly — {@link Unavailability} again, with the ceiling's rule instead of the
+     * blacklist's — which is the whole argument for having generalised the mechanism first.
+     *
+     * <p>Empty, and not computed at all, when no tier is stated. A filter this broad has to be
+     * provably off when it is off.
+     */
+    private Map<MfpKey, MfpKey> tierConsequences(Plan plan) {
+        TierCeiling ceiling = ceiling(plan);
+        if (!ceiling.isOn()) {
+            return Map.of();
+        }
+        if (ceiling == tierConsequencesFor) {
+            return tierConsequences;
+        }
+        tierConsequences = ceiling.consequences();
+        tierConsequencesFor = ceiling;
+        return tierConsequences;
+    }
+
+    /**
+     * Why the ceiling refuses this recipe, or null if it does not.
+     *
+     * <p>Both halves of the refusal in one sentence: the recipe's own voltage and machine, and an
+     * ingredient nothing at or below the tier can make (the closure). The second is the one that
+     * would otherwise be a mystery three items later.
+     *
+     * <p>Public because a line that survived the ceiling — pinned, a standing default, or the
+     * target — has to say that it did. A plan that quietly contains a machine the player cannot
+     * build is the fault this milestone is about, and it is not fixed by refusing it everywhere
+     * except where the user asked for it and then saying nothing.
+     */
+    public String beyondCeiling(MfpRecipe recipe, Plan plan) {
+        TierCeiling ceiling = ceiling(plan);
+        if (!ceiling.isOn()) {
+            return null;
+        }
+        String direct = ceiling.beyond(recipe);
+        if (direct != null) {
+            return direct;
+        }
+        MfpKey missing = Unavailability.refusedInput(recipe, ceiling.rule(), tierConsequences(plan));
+        if (missing == null) {
+            return null;
+        }
+        int component = ceiling.componentTier(missing);
+        return component >= 0
+                // A component's tier is a gate, so say so: "nothing at or below tier 3 makes that"
+                // is true and reads as a gap in the pack, where the truth is that nothing ever will
+                // below its own tier.
+                ? "it needs " + missing + ", which is a tier " + component + " ("
+                        + GtTiers.name(component) + ") component and you build at tier "
+                        + ceiling.tier()
+                : "it needs " + missing + ", and nothing at or below tier " + ceiling.tier()
+                        + " makes that";
+    }
+
+    /**
+     * This plan's blacklist, as one of {@link Unavailability}'s rules.
+     *
+     * <p>The whole of what "blacklisted" means to the shared fixpoint, and it is four short answers.
+     * A tier ceiling is a different four.
+     */
+    private Unavailability.Rule blacklistRule(Plan plan) {
+        // Cached on the plan's identity, and holding no snapshot of it, because this is asked once
+        // per recipe per candidate: allocating a rule inside the walk would be paying for the
+        // generalisation on the hot path. Every answer below reads the plan live, so blocking an
+        // item mid-session is seen without the cache needing to know it happened.
+        if (blacklistRule != null && ruleFor == plan) {
+            return blacklistRule;
+        }
+        ruleFor = plan;
+        blacklistRule = new Unavailability.Rule() {
+            @Override
+            public Set<MfpKey> refusedItems() {
+                // Asked once per closure, never in the walk, so it is worked out rather than held.
+                return blockedItems(plan);
+            }
+
+            @Override
+            public MfpKey refusedBecause(MfpKey key) {
+                return preferences.blocks(plan, key) ? key : null;
+            }
+
+            @Override
+            public boolean setsAside(MfpRecipe recipe) {
+                return plan != null && plan.blacklist().contains(recipe.id());
+            }
+
+            @Override
+            public boolean supplied(MfpKey key) {
+                return plan != null && plan.rawMaterials().contains(key);
+            }
+        };
+        return blacklistRule;
+    }
+
+    /**
      * @param unreachable items whose every route runs through a blacklisted one, and the blacklisted
      *                    item each of them ultimately blames
      */
     private MfpKey blockedInput(MfpRecipe recipe, Plan plan, Map<MfpKey, MfpKey> unreachable) {
-        Unavailable found = unavailableInput(recipe, plan, unreachable);
-        return found == null ? null : found.cause();
+        return Unavailability.refusedInput(recipe, blacklistRule(plan), unreachable);
     }
 
-    /**
-     * An ingredient the plan cannot have, and the blacklisted item to blame for it.
-     *
-     * <p>The two are the same thing until the blacklist's consequences are followed (M14): with
-     * inferium blocked, the ingredient is wood essence and the item to blame is still inferium.
-     * Both are worth saying - one is what the recipe wanted, the other is the decision that took it
-     * away and the only one the user can take back.
-     */
-    private record Unavailable(MfpKey input, MfpKey cause) {}
-
-    private Unavailable unavailableInput(MfpRecipe recipe, Plan plan,
-                                         Map<MfpKey, MfpKey> unreachable) {
-        for (MfpIngredient input : recipe.inputs()) {
-            if (!input.consumed() || input.effectiveAmount() <= 0) {
-                // A catalyst is a thing you own rather than a thing you consume, and the statement
-                // being made here is "I have no supply of this", not "I do not have one".
-                continue;
-            }
-            Unavailable blocked = null;
-            for (MfpKey candidate : input.candidates()) {
-                MfpKey cause = causeOfUnavailability(candidate, plan, unreachable);
-                if (cause == null) {
-                    blocked = null;
-                    break;
-                }
-                blocked = new Unavailable(candidate, cause);
-            }
-            if (blocked != null) {
-                return blocked;
-            }
-        }
-        return null;
-    }
-
-    /** The blacklisted item that makes {@code key} unavailable, directly or upstream. */
-    private MfpKey causeOfUnavailability(MfpKey key, Plan plan, Map<MfpKey, MfpKey> unreachable) {
-        if (preferences.blocks(plan, key)) {
-            return key;
-        }
-        return unreachable.get(key);
+    private Unavailability.Unavailable unavailableInput(MfpRecipe recipe, Plan plan,
+                                                        Map<MfpKey, MfpKey> unreachable) {
+        return Unavailability.unavailableInput(recipe, blacklistRule(plan), unreachable);
     }
 
     /**
@@ -1837,62 +1994,28 @@ public final class RecipeChooser {
      * building a greenhouse. Clicking it led two clicks further to an item with <em>no</em> ways to
      * make it at all, which is the walk's knowledge arriving too late to be any use.
      *
-     * <p>Same question, asked without a plan to walk. Blocking an item can only cost the plan
-     * things made <em>from</em> it, so the search starts at the blocked items and moves outwards
-     * through consumers: an item every one of whose recipes now needs something lost is lost too,
-     * and it is the next round's frontier. That is {@link #expandAvoiding}'s rule with the walk
-     * taken out, so the two cannot disagree about what the blacklist costs - and the same
-     * {@link #MAX_BLOCK_ROUNDS} bounds the chain either of them will follow.
+     * <p>Same question, asked without a plan to walk. The mechanism is {@link Unavailability}, and
+     * this is one of its rules rather than a second copy of it (M17): the search starts at the
+     * blocked items and moves outwards through consumers, bounded by the same
+     * {@link #MAX_BLOCK_ROUNDS} the walk observes, so the two cannot disagree about what a blacklist
+     * costs. What is written here is only the part that is about blacklisting -
+     * {@link #blacklistRule}, four short answers - and the caveats about raw materials and hidden
+     * recipes now live with the mechanism, because they are true of every rule it runs.
      *
      * <p>Computed once per blacklist and cached, because the recipe picker re-ranks on every
      * keystroke in its search box and this must not be something a keystroke pays for. The cache
      * key is the blacklist itself rather than the plan, so it survives every edit that cannot
      * change the answer - which is nearly all of them.
-     *
-     * <p>Two things it deliberately does not claim, both of them the walk's own rules:
-     *
-     * <ul>
-     *   <li><b>An item nothing produces is not lost, it is bought.</b> Raw ore has no recipe and
-     *       that is not the blacklist's doing. Only an item the pack can actually make, and now
-     *       cannot, propagates.
-     *   <li><b>A recipe the user hid is not a recipe the blacklist took.</b> Hidden recipes are
-     *       passed over here without ever becoming a reason, so "you hid it" and "you have none of
-     *       these" stay separate answers, as {@link #recordWhyNothingWorks} keeps them separate.
-     * </ul>
      */
     private Map<MfpKey, MfpKey> blacklistConsequences(Plan plan) {
-        Set<MfpKey> blocked = blockedItems(plan);
-        String signature = blocked.toString() + (plan == null ? "" : plan.blacklist().toString()
-                + plan.rawMaterials().toString());
+        String signature = blockedItems(plan).toString()
+                + (plan == null ? "" : plan.blacklist().toString()
+                        + plan.rawMaterials().toString());
         if (signature.equals(consequencesFor)) {
             return consequences;
         }
-        Map<MfpKey, MfpKey> lost = new LinkedHashMap<>();
-        Set<MfpKey> frontier = blocked;
-        for (int round = 0; round < MAX_BLOCK_ROUNDS && !frontier.isEmpty(); round++) {
-            Map<MfpKey, MfpKey> next = new LinkedHashMap<>();
-            for (MfpKey gone : frontier) {
-                for (MfpRecipe consumer : index.consuming(gone)) {
-                    for (MfpOutput output : consumer.outputs()) {
-                        MfpKey key = output.key();
-                        if (key.isPseudo() || lost.containsKey(key) || next.containsKey(key)
-                                || blocked.contains(key)) {
-                            continue;
-                        }
-                        MfpKey cause = everyRouteBlocked(key, plan, lost);
-                        if (cause != null) {
-                            next.put(key, cause);
-                        }
-                    }
-                }
-            }
-            if (next.isEmpty() || lost.size() + next.size() > BLACKLIST_REACH_LIMIT) {
-                break;
-            }
-            lost.putAll(next);
-            frontier = next.keySet();
-        }
-        consequences = Map.copyOf(lost);
+        consequences = Unavailability.closure(index, blacklistRule(plan),
+                MAX_BLOCK_ROUNDS, BLACKLIST_REACH_LIMIT);
         consequencesFor = signature;
         return consequences;
     }
@@ -1915,42 +2038,23 @@ public final class RecipeChooser {
         return blocked;
     }
 
-    /**
-     * The blacklisted item to blame when nothing left can make {@code key}, or null if something can.
-     *
-     * <p>"Or null if something can" is doing the work: one usable recipe is enough, and it is
-     * enough however many others are blocked, which is why this returns on the first one it finds
-     * rather than counting.
-     */
-    private MfpKey everyRouteBlocked(MfpKey key, Plan plan, Map<MfpKey, MfpKey> lost) {
-        if (plan != null && plan.rawMaterials().contains(key)) {
-            return null;
-        }
-        List<MfpRecipe> producers = index.producing(key);
-        if (producers.isEmpty()) {
-            return null;
-        }
-        MfpKey cause = null;
-        for (MfpRecipe producer : producers) {
-            if (isDeadEnd(producer, key)
-                    || (plan != null && plan.blacklist().contains(producer.id()))) {
-                continue;
-            }
-            MfpKey blocked = blockedInput(producer, plan, lost);
-            if (blocked == null) {
-                return null;
-            }
-            cause = lost.getOrDefault(blocked, blocked);
-        }
-        return cause;
-    }
-
     private List<MfpRecipe> usable(MfpKey key, Plan plan) {
-        return usable(key, plan, Set.of(), Map.of());
+        return usable(key, plan, Set.of(), Map.of(), false);
     }
 
     private List<MfpRecipe> usable(MfpKey key, Plan plan, Set<String> extraBlacklist,
                                    Map<MfpKey, MfpKey> unreachable) {
+        return usable(key, plan, extraBlacklist, unreachable, false);
+    }
+
+    /**
+     * @param underCeiling whether the tier the player builds at applies here (M17). Off for the
+     *                     picker, which lists over-tier recipes marked rather than hiding them, and
+     *                     off for a target, which is the question being asked rather than a step in
+     *                     answering it.
+     */
+    private List<MfpRecipe> usable(MfpKey key, Plan plan, Set<String> extraBlacklist,
+                                   Map<MfpKey, MfpKey> unreachable, boolean underCeiling) {
         Set<String> blacklist = plan == null ? Set.of() : plan.blacklist();
         List<MfpRecipe> usable = new ArrayList<>();
         for (MfpRecipe recipe : index.producing(key)) {
@@ -1967,6 +2071,12 @@ public final class RecipeChooser {
                 // steers every recipe that wanted it.
                 continue;
             }
+            if (underCeiling && beyondCeiling(recipe, plan) != null) {
+                // Not a dearer way of making this, and not a slower one: a way the player cannot
+                // build. The honest answer where every way is refused is an import with the reason
+                // on it (recordWhyNothingWorks), which is a decision they can see and act on.
+                continue;
+            }
             usable.add(recipe);
         }
         return usable;
@@ -1974,17 +2084,7 @@ public final class RecipeChooser {
 
     /** A recipe whose only route to {@code key} never actually fires is not a way of making it. */
     private static boolean isDeadEnd(MfpRecipe recipe, MfpKey key) {
-        boolean sawKey = false;
-        for (MfpOutput output : recipe.outputs()) {
-            if (!output.key().equals(key)) {
-                continue;
-            }
-            sawKey = true;
-            if (output.chance() > 0 && output.amount() > 0) {
-                return false;
-            }
-        }
-        return sawKey;
+        return Unavailability.isDeadEnd(recipe, key);
     }
 
     private static Set<MfpKey> producedBy(Plan plan) {
@@ -2255,7 +2355,7 @@ public final class RecipeChooser {
          * the picker to surface — the index must not silently narrow it.
          */
         private boolean unavailable(MfpKey key) {
-            return causeOfUnavailability(key, plan, unreachable) != null;
+            return Unavailability.causeOf(key, blacklistRule(plan), unreachable) != null;
         }
 
         private MfpKey chosenCandidate(MfpIngredient input) {
@@ -2289,6 +2389,16 @@ public final class RecipeChooser {
             return input.primary();
         }
 
+        /** Whether this is one of the plan's own targets, which the tier ceiling does not judge. */
+        private boolean isTarget(MfpKey key) {
+            for (TargetOutput target : plan.targets()) {
+                if (target.key().equals(key)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private MfpRecipe pick(MfpKey key) {
             String pinned = plan.recipeChoice(key);
             // Deliberately not checking extraBlacklist: a pin outranks the loop-avoidance pass, and
@@ -2312,7 +2422,29 @@ public final class RecipeChooser {
             if (standing != null) {
                 return standing;
             }
-            List<MfpRecipe> candidates = usable(key, plan, extraBlacklist, unreachable);
+            // The ceiling applies everywhere, including to a target - and a target that it leaves
+            // with nothing keeps its unfiltered list.
+            //
+            // Exempting the target outright was the first attempt and it was too broad. "How do I
+            // make nitrogen plasma" is a question with an answer and refusing the very thing that
+            // was asked hands back an empty plan, so the exemption has to exist; but a target has
+            // *inputs*, and exempting those too let the pack's tungsten plan answer with
+            // `start:arc_furnace/arc_iv_parallel_hatch` - melt down an IV parallel hatch you cannot
+            // build - and report the hatch as an import. Two lines and 774,000 EU/s where the honest
+            // answer is a chain. The scorer liked it because recycling one machine part yields six
+            // metals at once; nothing but the ceiling was ever going to refuse it.
+            //
+            // So: filter, and fall back only when the filter leaves nothing. That is the same
+            // "never give up a plan to keep the rule" clause expandAvoiding applies to the
+            // blacklist, and it separates the two cases exactly - the plasma has no route at HV and
+            // keeps its fusion reactor, marked; the tungsten has hundreds and takes one.
+            //
+            // A pin and a standing default were both consulted above this line, so both outrank the
+            // ceiling too: the user's own statement about this plan and this item is more specific.
+            List<MfpRecipe> candidates = usable(key, plan, extraBlacklist, unreachable, true);
+            if (candidates.isEmpty() && isTarget(key)) {
+                candidates = usable(key, plan, extraBlacklist, unreachable, false);
+            }
             String withdrawn = dedicatedFor.get(key);
             if (withdrawn != null) {
                 candidates = new ArrayList<>(candidates);
@@ -2382,6 +2514,11 @@ public final class RecipeChooser {
             int blocked = 0;
             int hidden = 0;
             int avoided = 0;
+            int overTier = 0;
+            String tierReason = null;
+            // A target only reaches here having found nothing at all, filtered or not, so the
+            // tier is as much a reason for it as for anything else.
+            boolean underCeiling = true;
             for (MfpRecipe candidate : producers) {
                 MfpKey found = blockedInput(candidate, plan, unreachable);
                 if (found != null) {
@@ -2391,20 +2528,56 @@ public final class RecipeChooser {
                     hidden++;
                 } else if (extraBlacklist.contains(candidate.id())) {
                     avoided++;
+                } else if (underCeiling) {
+                    String beyond = beyondCeiling(candidate, plan);
+                    if (beyond != null) {
+                        // The first is kept rather than the last: producers come out of the index
+                        // cheapest-looking first, and the reason a reader wants is the one for the
+                        // recipe they would otherwise have expected to see.
+                        tierReason = tierReason == null ? beyond : tierReason;
+                        overTier++;
+                    }
                 }
             }
+            // Every reason, not the winner of a ranking. Four decisions can each account for part
+            // of why an item has no route left, and picking one to print was defensible while
+            // there were three of them and they rarely coincided. The ceiling changed that: it
+            // refuses more recipes at once than the other three together, so any ranking that put
+            // it first would hide "you hid it" behind it, and any ranking that put it last would
+            // hide the finding this milestone exists to surface. Saying all of them costs a
+            // clause and settles the question.
+            List<String> reasons = new ArrayList<>(3);
             if (offender != null) {
-                importReasons.put(key, blocked + " recipe(s) for it need " + offender
+                reasons.add(blocked + " recipe(s) for it need " + offender
                         + ", which you have blacklisted");
                 // Remembered so the next round can treat this item as unavailable in its own right:
                 // if the only ways to make it need a blacklisted item, then so does it, and a route
                 // above that wanted it should be looking elsewhere.
+                //
+                // The tier case below deliberately does NOT do this. That set feeds the next
+                // round's blacklist map, and a tier refusal is not a blacklist refusal - it would
+                // come back out reported as "which you have blacklisted". The ceiling propagates
+                // through its own closure instead, which knows the answer for every item before the
+                // walk starts.
                 blockedKeys.put(key, offender);
-            } else if (avoided > 0) {
-                importReasons.put(key, avoided + " recipe(s) for it were passed over to keep the "
+            }
+            if (overTier > 0) {
+                int unlock = ceiling(plan).unlockTier(key);
+                reasons.add(overTier + " recipe(s) for it are above the tier you build at - "
+                        + tierReason
+                        + (unlock < 0 ? "; no tier makes it" : "; the nearest tier that can is "
+                                + unlock + " (" + GtTiers.name(unlock) + ")")
+                        + "; pin one, or /mfp ceiling off");
+            }
+            if (avoided > 0) {
+                reasons.add(avoided + " recipe(s) for it were passed over to keep the "
                         + "plan acyclic - pin one to use it anyway");
-            } else if (hidden > 0) {
-                importReasons.put(key, "you hid " + hidden + " recipe(s) for it");
+            }
+            if (hidden > 0) {
+                reasons.add("you hid " + hidden + " recipe(s) for it");
+            }
+            if (!reasons.isEmpty()) {
+                importReasons.put(key, String.join("; also ", reasons));
             }
         }
 
@@ -2430,7 +2603,7 @@ public final class RecipeChooser {
             List<Line> lines = new ArrayList<>();
             Set<MfpKey> preferred = preferences.preferredItemsFor(plan);
             for (MfpRecipe recipe : order()) {
-                MachineConfig machine = MachinePicker.pick(index, recipe, plan, preferences);
+                MachineConfig machine = MachinePicker.pick(index, recipe, plan, preferences, ceiling(plan));
                 // The user's choice of item for an ambiguous input is baked into the line's own copy
                 // of the recipe rather than carried alongside it, so the solver reads it without
                 // knowing it exists. Anything else risks a plan that expands wood pulp and demands

@@ -38,6 +38,7 @@ public final class Plan {
     private final List<String> displayOrder = new ArrayList<>();
     private SolverMode solverMode = SolverMode.AUTO;
     private boolean byproductFeeds = true;
+    private boolean tierCeiling = true;
     private boolean autoResolve = true;
     private boolean solverModeDerived;
     private int defaultTier = Preferences.NO_DEFAULT_TIER;
@@ -437,6 +438,26 @@ public final class Plan {
     }
 
     /**
+     * Whether the tier the player builds at is a requirement rather than a preference (M17).
+     *
+     * <p>On by default, because it is the truthful reading: a machine you cannot craft is not a
+     * dearer option, it is not an option. Off is a real preference and not a debug switch — a player
+     * planning what to aim for next is entitled to see the late-game route, and refusing to show it
+     * would make MFP useless for exactly the question "what would it take". A ceiling that cannot be
+     * overruled is a cage.
+     *
+     * <p>Does nothing at all unless a tier is stated, in the plan or in the standing preferences.
+     */
+    public boolean tierCeiling() {
+        return tierCeiling;
+    }
+
+    public Plan tierCeiling(boolean enabled) {
+        this.tierCeiling = enabled;
+        return this;
+    }
+
+    /**
      * Whether expansion may choose recipes on the user's behalf below the target (M11.3).
      *
      * <p>On by default, and off is how Factory Planner — the mod this is a port of — has always
@@ -580,6 +601,7 @@ public final class Plan {
         copy.allowedItems.addAll(allowedItems);
         copy.defaultTier = defaultTier;
         copy.byproductFeeds = byproductFeeds;
+        copy.tierCeiling = tierCeiling;
         copy.autoResolve = autoResolve;
         // A hand order is a decision, and it names recipes rather than the lines this copy has yet
         // to derive, so it travels like the pins do.
@@ -664,6 +686,7 @@ public final class Plan {
         displayOrder.addAll(snapshot.displayOrder);
         defaultTier = snapshot.defaultTier;
         byproductFeeds = snapshot.byproductFeeds;
+        tierCeiling = snapshot.tierCeiling;
         autoResolve = snapshot.autoResolve;
         solverMode = snapshot.solverMode;
         solverModeDerived = snapshot.solverModeDerived;

@@ -28,7 +28,13 @@ JAVA="/c/Program Files/Java/jdk-17/bin/java"
 # is precisely the failure the comment further down warns about.
 MOD_VERSION="$(sed -n 's/^[[:space:]]*mod_version=//p' "$REPO/gradle.properties" | tr -d '[:space:]')"
 JAR="mfp-1.20.1-${MOD_VERSION}.jar"
-BOOT_TIMEOUT="${PACKTEST_TIMEOUT:-900}"
+# Wall-clock cap on the whole run, boot included. It was 900 s and named for the boot, which is two
+# mistakes in one: nothing bounded a *command*, and fifteen minutes is long enough that a
+# pathological plan reads as a hung terminal rather than as a bug. It found one - M17's tier ceiling
+# rebuilt a 64,078-recipe scan per candidate recipe, and the symptom was a run that never came back.
+# A run needing longer than five minutes is a finding; raise it deliberately when it is expected:
+#   PACKTEST_TIMEOUT=900 tools/packtest.sh 'mfp plan 1 gtceu:tungsten_ingot'
+RUN_TIMEOUT="${PACKTEST_TIMEOUT:-300}"
 
 # Mods that cannot run on a dedicated server. Kept as a list rather than discovered every run: each
 # one cost a boot to find, and a boot of this pack is about forty seconds plus the JVM.
@@ -97,14 +103,32 @@ for command in "${args[@]}"; do
 done
 commands+="stop"$'\n'
 
+# A previous run killed by its cap, or by an interrupted terminal, may still be holding the port.
+. "$REPO/tools/freeport.sh"
+free_port_25565 || exit 1
+
 cd "$SERVER" || exit 1
 log="$SERVER/packtest.log"
-printf '%s' "$commands" | timeout "$BOOT_TIMEOUT" "$JAVA" @user_jvm_args.txt \
+started=$SECONDS
+printf '%s' "$commands" | timeout "$RUN_TIMEOUT" "$JAVA" @user_jvm_args.txt \
   @libraries/net/minecraftforge/forge/1.20.1-47.4.20/win_args.txt --nogui > "$log" 2>&1
 status=$?
+elapsed=$(( SECONDS - started ))
+
+if [[ $status -eq 124 ]]; then
+  # Killed by the cap. Which command was in flight is the whole question, and the log's last MFP
+  # lines answer it: the plan that never printed is the one still choosing.
+  echo "packtest: TIMED OUT after ${RUN_TIMEOUT}s. Commands given:" >&2
+  for command in "${args[@]}"; do echo "packtest:   $command" >&2; done
+  echo "packtest: last output before the cap:" >&2
+  grep -E 'MinecraftServer\]:|\[MFP/\]' "$log" | tail -15 \
+    | sed -E 's/^\[[0-9:]+\] \[[^]]+\]: ?/packtest:   /' >&2
+  echo "packtest: raise it with PACKTEST_TIMEOUT=<seconds> only when the wait is expected." >&2
+fi
 
 if [[ $raw -eq 1 ]]; then
   cat "$log"
+  echo "--- exit $status in ${elapsed}s"
   exit $status
 fi
 
@@ -114,5 +138,5 @@ fi
 grep -E "MinecraftServer\]:|\[MFP/\]|Failed to start the minecraft server|LoadingFailedException|Missing or unsupported mandatory" "$log" \
   | grep -vE "Preparing|Time elapsed|Saving|ThreadedAnvil|Stopping|Done \(|players online|Starting minecraft server|Loading properties|Default game type|Generating keypair|Environment|Using .* thread|Loaded .* recipes|Loaded .* advancements" \
   | sed -E 's/^\[[0-9:]+\] \[[^]]+\]: ?//'
-echo "--- exit $status; full log: $log"
+echo "--- exit $status in ${elapsed}s; full log: $log"
 exit $status

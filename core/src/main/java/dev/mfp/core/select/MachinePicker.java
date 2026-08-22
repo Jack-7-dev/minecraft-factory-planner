@@ -61,6 +61,26 @@ public final class MachinePicker {
     }
 
     /**
+     * The same, with machines above the stated tier removed rather than sorted last (M17).
+     *
+     * <p>Fault 2 of the milestone. {@link #order(RecipeIndex, int)} puts an over-tier machine after
+     * every machine at or below, nearest first, so "an EV-only recipe planned by someone who builds
+     * HV gets the EV machine rather than no machine". That was the right call while the tier was a
+     * preference and it is the wrong one now: the line the player cannot build should not be there
+     * at all, and the chooser refuses the recipe before it ever gets here.
+     *
+     * <p>Which is also why this falls back to the unfiltered list when the ceiling leaves nothing.
+     * By the time a machine is being picked the recipe has already been allowed — by the ceiling, by
+     * a pin, by a standing default or by being the target — and a line with no machine reports no
+     * numbers at all, which is a worse answer than one the plan has already said is above the tier.
+     */
+    static List<MfpMachine> candidatesUnderCeiling(RecipeIndex index, MfpRecipe recipe,
+                                                   int defaultTier, TierCeiling ceiling) {
+        List<MfpMachine> usable = candidates(index, recipe, defaultTier);
+        return ceiling == null || !ceiling.isOn() ? usable : ceiling.allowed(usable);
+    }
+
+    /**
      * Best default first: single blocks, then low tier, then cheap to build, then by id.
      *
      * <p>The third term is not a nicety. Star-Technology gives the {@code tree_greenhouse} recipe
@@ -221,6 +241,17 @@ public final class MachinePicker {
      */
     public static MachineConfig pick(RecipeIndex index, MfpRecipe recipe, Plan plan,
                                      Preferences preferences) {
+        return pick(index, recipe, plan, preferences, null);
+    }
+
+    /**
+     * The same, judged against the tier the player builds at (M17).
+     *
+     * <p>The ceiling is passed in rather than built here because building one walks the whole index
+     * twice, and this is called once per line. The chooser holds exactly one per plan.
+     */
+    static MachineConfig pick(RecipeIndex index, MfpRecipe recipe, Plan plan,
+                              Preferences preferences, TierCeiling ceiling) {
         // A configuration the user built for this exact recipe outranks everything, including their
         // own policy for the recipe type: it carries coils, hatches and limits that a type-level
         // choice cannot express, and re-deriving it would discard the build they described.
@@ -240,7 +271,7 @@ public final class MachinePicker {
             }
         }
 
-        List<MfpMachine> usable = candidates(index, recipe, defaultTier);
+        List<MfpMachine> usable = candidatesUnderCeiling(index, recipe, defaultTier, ceiling);
         return usable.isEmpty()
                 ? MachineConfig.UNSET : configFor(usable.get(0), recipe, defaultTier, preferences);
     }
@@ -314,7 +345,7 @@ public final class MachinePicker {
         return build.applyTo(MachineConfig.of(machine.id(), tier));
     }
 
-    private static boolean canRun(MfpMachine machine, MfpRecipe recipe) {
+    static boolean canRun(MfpMachine machine, MfpRecipe recipe) {
         if (machine == null) {
             return false;
         }

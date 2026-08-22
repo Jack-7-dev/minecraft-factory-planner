@@ -103,6 +103,9 @@ public final class RecipePickerScreen extends ModalScreen {
      */
     private final RecipeChooser chooser = new RecipeChooser(ClientIndex.get(), preferences());
 
+    /** Recipes the tier ceiling refuses, by id, and why — rebuilt with the ranked list. */
+    private final Map<String, String> beyondCeiling = new java.util.HashMap<>();
+
     /** Recipes the last expansion steered around because they closed a loop nothing fed. */
     private final java.util.Set<String> avoided = ClientPlanner.current() == null
             ? java.util.Set.of()
@@ -194,6 +197,9 @@ public final class RecipePickerScreen extends ModalScreen {
         widgets.add(search);
 
         List<RecipeScorer.Scored> ranked = chooser.alternatives(key, plan);
+        beyondCeiling.clear();
+        chooser.overTierAlternatives(key, plan)
+                .forEach((recipe, reason) -> beyondCeiling.put(recipe.id(), reason));
         count = ranked.size();
         // Filtered before grouping, so the tabs and their counts describe what is actually on
         // screen. Filtering afterwards would leave tabs that open onto nothing.
@@ -324,13 +330,23 @@ public final class RecipePickerScreen extends ModalScreen {
         int background = isPinned || isStanding ? Theme.ROW_SELECTED : 0;
         int colour = isPinned || isStanding ? Theme.PINNED : (isDefault ? Theme.TEXT : Theme.TEXT_DIM);
 
+        // Above the tier the player builds at: still listed, still rankable, still clickable -
+        // clicking pins it, which outranks the ceiling. Hidden, this would make the pack look as
+        // though it had shrunk; unmarked, it would be an invitation to build something they cannot
+        // (M17). Same rule as a blocked input, which this screen has marked since §17.6.
+        String overTier = beyondCeiling.get(recipe.id());
+        if (overTier != null && !isPinned && !isStanding) {
+            colour = Theme.TEXT_DIM;
+        }
+
         into.addRow(List.of(
                         Cells.iconTwoLine(MachineStacks.iconForRecipeType(recipe.recipeTypeId()),
                                 MachineStacks.shortName(recipe.recipeTypeId()), colour,
                                 (isStanding ? "your default  -  " : "")
                                         + (avoided.contains(recipe.id()) ? "loop  -  " : "")
+                                        + (overTier == null ? "" : "above your tier  -  ")
                                         + recipe.recipeTypeId() + durationSuffix(recipe),
-                                recipeTooltip(recipe, scored)),
+                                overTierTooltip(recipe, scored, overTier)),
                         Cells.flows(outputSlots(recipe)),
                         rateCell(recipe),
                         IngredientChoiceScreen.hasChoices(recipe)
@@ -350,6 +366,20 @@ public final class RecipePickerScreen extends ModalScreen {
                         hide(recipe);
                     }
                 });
+    }
+
+    /** The usual tooltip, plus why the ceiling refuses this recipe and what to do about it (M17). */
+    private List<Component> overTierTooltip(MfpRecipe recipe, RecipeScorer.Scored scored,
+                                            String overTier) {
+        if (overTier == null) {
+            return recipeTooltip(recipe, scored);
+        }
+        List<Component> lines = new ArrayList<>(recipeTooltip(recipe, scored));
+        lines.add(Component.literal("Above the tier you build at: " + overTier + ".")
+                .withStyle(ChatFormatting.YELLOW));
+        lines.add(Component.literal("Click to pin it anyway - your choice outranks the tier.")
+                .withStyle(ChatFormatting.GRAY));
+        return lines;
     }
 
     /**
@@ -424,7 +454,9 @@ public final class RecipePickerScreen extends ModalScreen {
                     .withStyle(ChatFormatting.GRAY)));
         }
 
-        MachineConfig config = MachinePicker.pick(index, recipe, plan, preferences());
+        // Through the chooser, so the preview is the machine the plan would actually use: under a
+        // tier ceiling that is not always the one MachinePicker would offer with no plan in hand.
+        MachineConfig config = chooser.pickMachine(recipe, plan);
         Throughput throughput = resolver().resolve(recipe, config);
         double perCraft = 0;
         for (MfpOutput output : recipe.outputs()) {

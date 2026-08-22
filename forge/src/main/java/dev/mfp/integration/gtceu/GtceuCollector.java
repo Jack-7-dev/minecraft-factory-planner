@@ -52,10 +52,24 @@ public final class GtceuCollector {
         // After the recipes, because classification resolves lazy material suppliers and the
         // recycling recipes above are generated from the same table.
         int forms = GtMaterialForms.collect(sink);
+        // The items whose tier is a gate rather than a cost (M17). Reported in the same line
+        // because the number dropping is the symptom of a fork that has moved its tags, and a
+        // classifier nobody watches is one that silently stops classifying.
+        GtComponentTiers.Result components = GtComponentTiers.collect(sink);
 
         LOGGER.info("MFP GregTech ingestion: {} recipes from the recipe manager, {} synthesised, "
-                        + "{} machines, {} items classified by form",
-                fromManager, synthetic, machines, forms);
+                        + "{} machines, {} items classified by form, {} tiered components "
+                        + "({} circuits)",
+                fromManager, synthetic, machines, forms,
+                components.classified(), components.circuits());
+        if (!components.unrecognised().isEmpty()) {
+            LOGGER.warn("MFP: {} item(s) look like GregTech components but carry no tier in their "
+                            + "id, so they are NOT gated by tier - run /mfp components: {}",
+                    components.unrecognised().size(),
+                    components.unrecognised().size() > 12
+                            ? components.unrecognised().subList(0, 12) + " ..."
+                            : components.unrecognised());
+        }
     }
 
     private static int collectFromRecipeManager(MfpRecipeSink sink,

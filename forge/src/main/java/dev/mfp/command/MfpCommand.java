@@ -75,6 +75,13 @@ public final class MfpCommand {
         // Where a multiblock's structure is declared, read without a client (M16).
         MfpStructureCommand.register(root);
 
+        // The items whose tier is a gate rather than a cost (M17). A coverage audit like
+        // `mfp modifiers`: the number quietly dropping to zero after a fork update is the shape of
+        // failure that lets a plan offer an IV component to a player at HV.
+        root.then(Commands.literal("components")
+                .executes(ctx -> reportComponents(ctx.getSource())));
+
+
         // Planning, explanation and the recipe picker's ranked list.
         MfpPlanCommand.register(root);
 
@@ -183,6 +190,50 @@ public final class MfpCommand {
     }
 
     /** Which machines can run a recipe type, in the order the default-machine policy sees them. */
+    /**
+     * Every tiered component MFP knows about, by tier.
+     *
+     * <p>An audit rather than a listing, and the same argument {@code mfp modifiers} makes: the
+     * classification comes from GregTech's own tags, so a fork that renames or drops one costs MFP
+     * a whole family silently, and the symptom - a plan offering a machine the player cannot build
+     * - shows up nowhere near the cause. A count per tier is enough to see it happen.
+     */
+    private static int reportComponents(CommandSourceStack source) {
+        RecipeIndex index = MfpIndexHolder.get(source.getServer());
+        Map<dev.mfp.core.model.MfpKey, Integer> tiers = index.componentTiers();
+        if (tiers.isEmpty()) {
+            send(source, "MFP: no tiered components - either there is no GregTech here, or the "
+                    + "component tags have moved and NOTHING is being gated by tier",
+                    ChatFormatting.RED);
+            return 0;
+        }
+
+        Map<Integer, List<String>> byTier = new java.util.TreeMap<>();
+        tiers.forEach((key, tier) ->
+                byTier.computeIfAbsent(tier, t -> new ArrayList<>()).add(String.valueOf(key)));
+
+        send(source, "MFP tiered components: " + tiers.size() + " item(s) whose tier is a gate, "
+                + "not a cost", ChatFormatting.GREEN);
+        int standingTier = dev.mfp.plan.PreferenceStore.get().defaultTier();
+        byTier.forEach((tier, keys) -> {
+            keys.sort(Comparator.naturalOrder());
+            String sample = keys.size() > 4
+                    ? String.join(", ", keys.subList(0, 4)) + ", ... "
+                    : String.join(", ", keys);
+            send(source, "  T" + tier + " (" + dev.mfp.core.behaviour.GtTiers.name(tier) + "): "
+                            + keys.size() + "  " + sample,
+                    standingTier >= 0 && tier > standingTier
+                            ? ChatFormatting.YELLOW : ChatFormatting.WHITE);
+        });
+        if (standingTier >= 0) {
+            send(source, "  yellow is above the tier you build at, so refused outright - "
+                    + "/mfp ceiling off to see them anyway", ChatFormatting.GRAY);
+        } else {
+            send(source, "  no default tier set, so none of this gates anything", ChatFormatting.GRAY);
+        }
+        return tiers.size();
+    }
+
     private static int reportMachines(CommandSourceStack source, String recipeTypeId) {
         List<MfpMachine> machines = MfpIndexHolder.get(source.getServer()).machinesFor(recipeTypeId.trim());
         if (machines.isEmpty()) {
@@ -201,14 +252,28 @@ public final class MfpCommand {
 
         send(source, machines.size() + " machine(s) for " + recipeTypeId
                 + ", default first", ChatFormatting.GOLD);
+        // And whether the player could actually build each one (M17 slice B). A listing that offers
+        // a default the planner has just declared unbuildable is worse than either answer alone -
+        // and the two numbers beside it are a comparator's shallow halves, which is exactly the
+        // distinction worth showing here: buildCost and partsCost look one level, this looks all
+        // the way down.
+        dev.mfp.plan.PlanSession session = dev.mfp.plan.PlanSession.of(source.getTextName());
+        dev.mfp.core.plan.Plan plan = session == null ? null : session.plan();
+        dev.mfp.core.select.RecipeChooser chooser =
+                new dev.mfp.core.select.RecipeChooser(index, dev.mfp.plan.PreferenceStore.get());
         for (MfpMachine machine : ordered) {
             int build = dev.mfp.core.select.MachinePicker.buildCost(index, machine);
             int parts = dev.mfp.core.select.MachinePicker.partsCost(index, machine);
+            dev.mfp.core.model.MfpKey missing = chooser.missingPartOf(machine, plan);
             send(source, "  " + describe(machine)
                             + "  [built at " + (build < 0 ? "?" : "T" + build)
                             + ", from parts up to " + (parts == Integer.MAX_VALUE ? "?" : "T" + parts)
-                            + "]",
-                    ChatFormatting.WHITE);
+                            + "]"
+                            + (missing == null ? ""
+                                    : missing.toString().equals(machine.id())
+                                            ? "  [you cannot build one at your tier]"
+                                            : "  [you cannot build one: needs " + missing + "]"),
+                    missing == null ? ChatFormatting.WHITE : ChatFormatting.YELLOW);
         }
         return machines.size();
     }

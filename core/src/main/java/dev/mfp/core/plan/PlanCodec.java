@@ -91,6 +91,11 @@ public final class PlanCodec {
             // user chose it.
             json.addProperty("byproductFeeds", false);
         }
+        if (!plan.tierCeiling()) {
+            // Same rule and the same reason: the default is that the stated tier is a requirement,
+            // and a plan on disk should not pin that decision for a version that changes it.
+            json.addProperty("tierCeiling", false);
+        }
         if (!plan.autoResolve()) {
             // Same rule, and it matters more here: a hand-built plan whose "the chooser stops below
             // the target" flag was lost would silently re-expand into an automatic one on reload,
@@ -219,6 +224,9 @@ public final class PlanCodec {
         }
         for (JsonElement element : array(json, "allowedItems")) {
             plan.allowItem(KeySpec.parse(element.getAsString()));
+        }
+        if (json.has("tierCeiling")) {
+            plan.tierCeiling(json.get("tierCeiling").getAsBoolean());
         }
         if (json.has("byproductFeeds")) {
             plan.byproductFeeds(json.get("byproductFeeds").getAsBoolean());

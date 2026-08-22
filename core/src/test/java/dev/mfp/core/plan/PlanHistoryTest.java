@@ -269,7 +269,7 @@ class PlanHistoryTest {
                 "blacklistRecipe", "unblacklistRecipe",
                 "blockItem", "unblockItem",
                 "allowItem", "clearAllowedItem",
-                "defaultTier", "byproductFeeds", "autoResolve",
+                "defaultTier", "byproductFeeds", "tierCeiling", "autoResolve",
                 "displayOrder", "clearDisplayOrder",
                 "solverMode"));
 

@@ -39,6 +39,7 @@ public final class RecipeIndex {
     private final Map<String, MfpMachine> machinesById;
     private final Map<String, List<MfpMachine>> machinesByRecipeType;
     private final Map<MfpKey, MaterialForm> forms;
+    private final Map<MfpKey, Integer> componentTiers;
     private final IndexStats stats;
 
     private RecipeIndex(List<MfpRecipe> all,
@@ -48,8 +49,10 @@ public final class RecipeIndex {
                         Map<String, MfpMachine> machinesById,
                         Map<String, List<MfpMachine>> machinesByRecipeType,
                         Map<MfpKey, MaterialForm> forms,
+                        Map<MfpKey, Integer> componentTiers,
                         IndexStats stats) {
         this.forms = forms;
+        this.componentTiers = componentTiers;
         this.all = all;
         this.byId = byId;
         this.byOutput = byOutput;
@@ -105,6 +108,17 @@ public final class RecipeIndex {
         return forms.size();
     }
 
+    /**
+     * Every tiered component the providers classified, and the tier of each.
+     *
+     * <p>A gate rather than a cost — see {@link MfpRecipeSink#componentTier}. Handed over whole
+     * rather than looked up per key because its one consumer needs all of it at once: the tier
+     * ceiling seeds its fixpoint with every component above the tier the player builds at.
+     */
+    public Map<MfpKey, Integer> componentTiers() {
+        return componentTiers;
+    }
+
     public List<MfpMachine> machines() {
         return List.copyOf(machinesById.values());
     }
@@ -133,6 +147,7 @@ public final class RecipeIndex {
         private final Map<String, Integer> recipePriority = new LinkedHashMap<>();
         private final Map<String, MfpMachine> machinesById = new LinkedHashMap<>();
         private final Map<MfpKey, MaterialForm> forms = new LinkedHashMap<>();
+        private final Map<MfpKey, Integer> componentTiers = new LinkedHashMap<>();
         private final List<IndexStats.Skip> skips = new ArrayList<>();
         private final long startNanos = System.nanoTime();
 
@@ -175,6 +190,15 @@ public final class RecipeIndex {
             // First classification wins, matching the provider-priority rule for machines: a later
             // provider re-describing an item MFP already understands is not new information.
             forms.putIfAbsent(key, Objects.requireNonNull(form, "form"));
+        }
+
+        @Override
+        public void componentTier(MfpKey key, int tier) {
+            Objects.requireNonNull(key, "key");
+            if (tier >= 0) {
+                // First classification wins, as it does for forms and machines.
+                componentTiers.putIfAbsent(key, tier);
+            }
         }
 
         @Override
@@ -241,6 +265,7 @@ public final class RecipeIndex {
                     Collections.unmodifiableMap(new LinkedHashMap<>(machinesById)),
                     freeze(machinesByRecipeType),
                     Collections.unmodifiableMap(new LinkedHashMap<>(forms)),
+                    Collections.unmodifiableMap(new LinkedHashMap<>(componentTiers)),
                     stats);
         }
 

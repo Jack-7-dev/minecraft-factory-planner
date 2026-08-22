@@ -16,11 +16,13 @@ import dev.mfp.core.behaviour.MachineBehaviour;
 import dev.mfp.core.behaviour.OptionSpec;
 import dev.mfp.core.behaviour.ThroughputResult;
 import dev.mfp.core.model.MfpMachine;
+import dev.mfp.core.model.MfpKey;
 import dev.mfp.core.model.MfpRecipe;
 import dev.mfp.core.plan.MachineConfig;
 import dev.mfp.core.plan.MachineDefaults;
 import dev.mfp.core.plan.Plan;
 import dev.mfp.core.select.MachinePicker;
+import dev.mfp.core.select.RecipeChooser;
 import dev.mfp.plan.PreferenceStore;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.GuiGraphics;
@@ -126,17 +128,46 @@ public final class MachineConfigScreen extends ModalScreen {
 
     // ---------------------------------------------------------------- machines
 
+    /**
+     * The machine's usual tooltip, or why the player cannot build one (M17).
+     *
+     * <p>Named rather than merely greyed, because "you cannot build this" and "there is a part
+     * inside it you cannot make" send the reader to different places.
+     */
+    private List<Component> unbuildableTooltip(MfpMachine machine, MfpKey missing) {
+        if (missing == null) {
+            return machineTooltip(machine);
+        }
+        List<Component> lines = new java.util.ArrayList<>(machineTooltip(machine));
+        lines.add(Component.literal(missing.toString().equals(machine.id())
+                        ? "Nothing at or below the tier you build at makes one of these."
+                        : "You cannot build one at your tier: it needs " + missing + ".")
+                .withStyle(ChatFormatting.YELLOW));
+        lines.add(Component.literal("Choosing it anyway is allowed - your choice outranks the tier.")
+                .withStyle(ChatFormatting.GRAY));
+        return lines;
+    }
+
     private void buildMachineList(int x, int y, int listWidth) {
         List<MfpMachine> candidates = MachinePicker.candidates(ClientIndex.get(), recipe);
+        // Still all of them, marked (M17). Choosing one here is the user's own statement about this
+        // line and outranks the ceiling, exactly as a pin does - so hiding the ones they cannot yet
+        // build would remove the escape rather than enforce the rule. What the tab must not do is
+        // let one pass for buildable while the plan has just refused it.
+        RecipeChooser chooser = new RecipeChooser(ClientIndex.get(), PreferenceStore.get());
 
         Table table = new Table(MACHINE_COLUMNS);
         for (MfpMachine machine : candidates) {
             boolean selected = machine.id().equals(config.machineId());
+            MfpKey missing = chooser.missingPartOf(machine, plan);
             table.addRow(List.of(
                             Cells.iconTwoLine(MachineStacks.icon(machine.id()), machine.displayName(),
-                                    selected ? Theme.PINNED : Theme.TEXT,
-                                    machine.multiblock() ? "multiblock" : pathOf(machine.id()),
-                                    machineTooltip(machine)),
+                                    selected ? Theme.PINNED
+                                            : missing == null ? Theme.TEXT : Theme.TEXT_DIM,
+                                    missing == null
+                                            ? (machine.multiblock() ? "multiblock" : pathOf(machine.id()))
+                                            : "above your tier",
+                                    unbuildableTooltip(machine, missing)),
                             Cells.text(machine.tier() < 0 ? "hatch" : GtTiers.name(machine.tier()),
                                     Theme.TEXT_DIM,
                                     machine.tier() < 0
