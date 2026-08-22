@@ -4,6 +4,7 @@ import dev.mfp.behaviour.RawMaterialConfig;
 import dev.mfp.core.index.RecipeIndex;
 import dev.mfp.core.model.MfpKey;
 import dev.mfp.core.plan.Plan;
+import dev.mfp.core.plan.PlanHistory;
 import dev.mfp.core.select.ChooserResult;
 import dev.mfp.core.select.RecipeChooser;
 import dev.mfp.core.solver.BehaviourThroughputResolver;
@@ -134,7 +135,7 @@ public final class ClientPlanner {
 
     /** Adds an already-built plan, solves it, and makes it current. */
     public static ClientPlan add(Plan plan) {
-        ClientPlan solved = solve(plan, ClientIndex.get());
+        ClientPlan solved = solve(plan, ClientIndex.get(), new PlanHistory());
         PLANS.add(solved);
         currentIndex = PLANS.size() - 1;
         return solved;
@@ -152,12 +153,53 @@ public final class ClientPlanner {
         if (existing == null) {
             return null;
         }
-        ClientPlan resolved = solve(existing.plan(), ClientIndex.get());
+        ClientPlan resolved = solve(existing.plan(), ClientIndex.get(), existing.history());
         PLANS.set(currentIndex, resolved);
         return resolved;
     }
 
-    private static ClientPlan solve(Plan plan, RecipeIndex index) {
+    /**
+     * Take back the last edit to the current plan (M15), and re-solve.
+     *
+     * <p>Here rather than in the screen because this is the only place that knows the pipeline an
+     * edit ends in, and undo has to end in exactly the same one: a plan restored but not re-solved
+     * would show the old answer beside the restored decisions.
+     *
+     * @return the re-solved plan, or null when there was nothing to take back
+     */
+    public static ClientPlan undo() {
+        ClientPlan existing = current();
+        if (existing == null || !existing.history().undo(existing.plan())) {
+            return null;
+        }
+        return refresh();
+    }
+
+    /**
+     * File an edit that changed no number, so it is a step of its own.
+     *
+     * <p>One gesture in the planner mutates the plan without re-solving — renaming it — and a solve
+     * is where every other edit is noticed. Without this the rename would be filed together with
+     * whatever the user did next, and one press of undo would take back two things they did not do
+     * together, which is exactly the untrustworthiness undo exists to remove.
+     */
+    public static void recordEdit() {
+        ClientPlan existing = current();
+        if (existing != null) {
+            existing.history().record(existing.plan());
+        }
+    }
+
+    /** The other direction, and what makes undo safe to press. */
+    public static ClientPlan redo() {
+        ClientPlan existing = current();
+        if (existing == null || !existing.history().redo(existing.plan())) {
+            return null;
+        }
+        return refresh();
+    }
+
+    private static ClientPlan solve(Plan plan, RecipeIndex index, PlanHistory history) {
         long started = System.nanoTime();
 
         // Expansion appends, so the previous solve's lines have to go first. The plan's targets and
@@ -181,7 +223,13 @@ public final class ClientPlanner {
         // In microseconds, rendered as milliseconds with a decimal: a matrix solve of four lines
         // really does take a fraction of a millisecond, and "0 ms" reads as a broken clock rather
         // than as the answer.
-        return new ClientPlan(plan, chooserResult, solved, resolver,
+        // After the solve, not before it: the chooser may have derived a solver mode on the way
+        // through, and a baseline taken before that would read the derivation as the user's next
+        // edit. It files a step only when the plan itself moved, so the Refresh button and every
+        // display-only toggle in the planner cost nothing here.
+        history.record(plan);
+
+        return new ClientPlan(plan, chooserResult, solved, resolver, history,
                 (chosen - started) / 1_000L, (done - chosen) / 1_000L);
     }
 }

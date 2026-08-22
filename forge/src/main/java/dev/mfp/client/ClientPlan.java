@@ -3,6 +3,7 @@ package dev.mfp.client;
 import dev.mfp.core.behaviour.ThroughputResult;
 import dev.mfp.core.plan.Line;
 import dev.mfp.core.plan.Plan;
+import dev.mfp.core.plan.PlanHistory;
 import dev.mfp.core.select.ChooserResult;
 import dev.mfp.core.solver.BehaviourThroughputResolver;
 import dev.mfp.core.solver.SolveResult;
@@ -17,6 +18,10 @@ import java.util.Objects;
  * re-solved per frame could show numbers that never existed together, which is the one thing a
  * planner must not do.
  *
+ * @param history what this plan looked like before each of the last few edits (M15). Carried from
+ *                one solve to the next rather than rebuilt, because it is the one thing here that
+ *                is <em>not</em> a property of this solve: a history that started again whenever a
+ *                plan was re-solved would be a history with nothing in it.
  * @param chooseMicros how long choosing the recipes took, in microseconds - a separate number from the
  *                     solve on purpose: they fail differently, and the one that gets slow is
  *                     usually this one. A loop makes the chooser walk the whole graph again for
@@ -32,6 +37,7 @@ public record ClientPlan(
         ChooserResult chooserResult,
         SolveResult solveResult,
         BehaviourThroughputResolver resolver,
+        PlanHistory history,
         long chooseMicros,
         long solveMicros) {
 
@@ -47,6 +53,7 @@ public record ClientPlan(
         Objects.requireNonNull(chooserResult, "chooserResult");
         Objects.requireNonNull(solveResult, "solveResult");
         Objects.requireNonNull(resolver, "resolver");
+        Objects.requireNonNull(history, "history");
     }
 
     /**

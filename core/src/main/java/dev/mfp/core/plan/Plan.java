@@ -592,6 +592,84 @@ public final class Plan {
         return copy;
     }
 
+    /**
+     * This plan's whole state, for undo (M15) — everything {@link #copy(String)} keeps, and the
+     * three things it deliberately drops.
+     *
+     * <p>A copy is for "duplicate this and try it another way", so it takes a new name and leaves
+     * behind anything belonging to lines the duplicate has yet to derive. A snapshot is for "put it
+     * back exactly", and a name is one of the things an undo has to put back: renaming a plan is an
+     * edit like any other, and an undo that restored every pin but left the new name on it would be
+     * the kind of half-answer that makes undo untrustworthy.
+     *
+     * <p>The lines are still not copied, for the reason {@link #copy(String)} gives — they are
+     * output, re-derived by the solve that follows a restore.
+     */
+    public Plan snapshot() {
+        Plan snapshot = copy(name);
+        snapshot.name = name;
+        snapshot.named = named;
+        // Derived or chosen: a restore is putting back a state, not making a fresh decision, so the
+        // distinction travels with it. Restoring a derived MATRIX as an explicit one would pin an
+        // engine the user never picked.
+        snapshot.solverMode = solverMode;
+        snapshot.solverModeDerived = solverModeDerived;
+        return snapshot;
+    }
+
+    /**
+     * Become the snapshot, in place.
+     *
+     * <p>In place rather than by handing back a new plan because every screen in the planner and
+     * every session on a server holds the {@link Plan} it was opened with; an undo that replaced the
+     * object would leave them editing one nothing is showing.
+     *
+     * <p>The lines go, exactly as {@link #clearLines()} drops them before a re-expansion: they were
+     * derived from the state being replaced, and keeping them would leave the table showing an
+     * answer to the previous question until the next solve finished.
+     */
+    public Plan restoreFrom(Plan snapshot) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (snapshot == this) {
+            return this;
+        }
+        root.clear();
+
+        name = snapshot.name;
+        named = snapshot.named;
+        targets.clear();
+        targets.addAll(snapshot.targets);
+        freeItems.clear();
+        freeItems.addAll(snapshot.freeItems);
+        rawMaterialsAdded.clear();
+        rawMaterialsAdded.addAll(snapshot.rawMaterialsAdded);
+        rawMaterialsRemoved.clear();
+        rawMaterialsRemoved.addAll(snapshot.rawMaterialsRemoved);
+        invalidateRawMaterials();
+        preferredItems.clear();
+        preferredItems.addAll(snapshot.preferredItems);
+        recipeChoices.clear();
+        recipeChoices.putAll(snapshot.recipeChoices);
+        machineChoices.clear();
+        machineChoices.putAll(snapshot.machineChoices);
+        machineConfigs.clear();
+        machineConfigs.putAll(snapshot.machineConfigs);
+        blacklist.clear();
+        blacklist.addAll(snapshot.blacklist);
+        blockedItems.clear();
+        blockedItems.addAll(snapshot.blockedItems);
+        allowedItems.clear();
+        allowedItems.addAll(snapshot.allowedItems);
+        displayOrder.clear();
+        displayOrder.addAll(snapshot.displayOrder);
+        defaultTier = snapshot.defaultTier;
+        byproductFeeds = snapshot.byproductFeeds;
+        autoResolve = snapshot.autoResolve;
+        solverMode = snapshot.solverMode;
+        solverModeDerived = snapshot.solverModeDerived;
+        return this;
+    }
+
     public List<Line> allLines() {
         return root.allLines();
     }

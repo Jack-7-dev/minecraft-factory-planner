@@ -88,7 +88,12 @@ public final class PlanSettingsScreen extends ModalScreen {
                     .maxLength(60)
                     .placeholder("plan name")
                     .tooltip("What this plan is called in the plan list.")
-                    .onCommit(value -> plan.name(value.isBlank() ? "Untitled" : value.trim()));
+                    .onCommit(value -> {
+                        plan.name(value.isBlank() ? "Untitled" : value.trim());
+                        // A name changes no number, so nothing re-solves; undo still has to see it
+                        // as its own step (M15).
+                        ClientPlanner.recordEdit();
+                    });
         }
         name.bounds(contentX() + labelWidth, cursorY, contentWidth() - labelWidth, 14);
         widgets.add(name);

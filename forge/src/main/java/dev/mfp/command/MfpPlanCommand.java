@@ -135,6 +135,29 @@ public final class MfpPlanCommand {
         root.then(Commands.literal("export")
                 .executes(ctx -> exportPlan(ctx.getSource())));
 
+        // Retargeting the plan that is already here, rather than building a new one: the GUI's rate
+        // box edits a target in place and everything below it re-sizes, and until now the only
+        // headless way to change a rate was `mfp plan`, which starts again — a different plan, with
+        // a different history. Scaling a plan is the commonest edit there is and M15's acceptance is
+        // written around it, so it needs to be an edit here too.
+        root.then(Commands.literal("scale")
+                .then(Commands.argument("perSecond", DoubleArgumentType.doubleArg(0.0001))
+                        .executes(ctx -> scale(ctx.getSource(),
+                                DoubleArgumentType.getDouble(ctx, "perSecond"), null))
+                        .then(Commands.argument("item", StringArgumentType.greedyString())
+                                .executes(ctx -> scale(ctx.getSource(),
+                                        DoubleArgumentType.getDouble(ctx, "perSecond"),
+                                        StringArgumentType.getString(ctx, "item"))))));
+
+        // Undo, headlessly (M15). The GUI's version is Ctrl+Z and two buttons, and without these
+        // the claim that an edit can be taken back *exactly* would be checkable only by eye: here
+        // it is `mfp export` before and after, diffed, which is how the acceptance is measured.
+        root.then(Commands.literal("undo")
+                .executes(ctx -> step(ctx.getSource(), true)));
+
+        root.then(Commands.literal("redo")
+                .executes(ctx -> step(ctx.getSource(), false)));
+
         root.then(Commands.literal("alternatives")
                 .then(Commands.argument("item", StringArgumentType.greedyString())
                         .executes(ctx -> alternatives(ctx.getSource(),
@@ -254,6 +277,79 @@ public final class MfpPlanCommand {
         }
         send(source, PlanExport.export(session.plan()), ChatFormatting.WHITE);
         return 1;
+    }
+
+    /**
+     * Change what the current plan is asked for, without starting a new one.
+     *
+     * <p>By index, like {@link Plan#setTarget}, because a plan may legitimately ask for the same
+     * item twice; with no item named it is the first target, which is the one every headless plan
+     * has.
+     */
+    private static int scale(CommandSourceStack source, double perSecond, String itemSpec) {
+        PlanSession session = PlanSession.of(source.getTextName());
+        if (session == null) {
+            send(source, "MFP: no plan to scale yet - run /mfp plan first", ChatFormatting.RED);
+            return 0;
+        }
+        Plan plan = session.plan();
+        List<TargetOutput> targets = plan.targets();
+        int index = 0;
+        if (itemSpec != null) {
+            MfpKey key = parseKey(itemSpec);
+            index = -1;
+            for (int i = 0; i < targets.size(); i++) {
+                if (targets.get(i).key().equals(key)) {
+                    index = i;
+                    break;
+                }
+            }
+            if (index < 0) {
+                send(source, "MFP: this plan does not ask for " + key, ChatFormatting.RED);
+                return 0;
+            }
+        }
+        TargetOutput target = targets.get(index);
+        plan.setTarget(index, new TargetOutput(target.key(), perSecond));
+        send(source, "MFP: " + KeySpec.of(target.key()) + " " + target.perSecond() + "/s -> "
+                + perSecond + "/s", ChatFormatting.GRAY);
+        return choose(source, MfpIndexHolder.get(source.getServer()), plan);
+    }
+
+    /**
+     * Take one step back through the session's plan, or forward again.
+     *
+     * <p>Restores the state and re-runs the same {@link #choose} every edit ends in, because a plan
+     * put back but not re-solved would report the previous answer beside the restored decisions —
+     * and it is the numbers, not the pins, that a user checks after pressing undo.
+     */
+    private static int step(CommandSourceStack source, boolean back) {
+        PlanSession session = PlanSession.of(source.getTextName());
+        if (session == null) {
+            send(source, "MFP: no plan yet - run /mfp plan first", ChatFormatting.RED);
+            return 0;
+        }
+        Plan plan = session.plan();
+        boolean moved = back ? session.history().undo(plan) : session.history().redo(plan);
+        if (!moved) {
+            send(source, "MFP: nothing to " + (back ? "undo" : "redo"), ChatFormatting.GRAY);
+            return 0;
+        }
+        // The size is reported because "a copy per edit of a thousand-line pack plan is not free"
+        // is the objection this design had to answer, and an answer nobody can read is not one. A
+        // snapshot holds what the user decided and never the lines, so it is the pins that cost,
+        // not the plan.
+        send(source, "MFP: " + (back ? "undid" : "redid") + " one edit - "
+                        + session.history().undoDepth() + " back, "
+                        + session.history().redoDepth() + " forward, "
+                        + historySize(session.history().measuredBytes()) + " of history",
+                ChatFormatting.GRAY);
+        return choose(source, MfpIndexHolder.get(source.getServer()), plan);
+    }
+
+    /** Bytes, or kilobytes once there are enough of them: "0 KB" reads as a broken counter. */
+    private static String historySize(long bytes) {
+        return bytes < 1024 ? bytes + " bytes" : (bytes / 1024) + " KB";
     }
 
     /** An engine pinned for this session's commands, or null to let the plan decide. */

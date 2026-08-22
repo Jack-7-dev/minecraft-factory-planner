@@ -37,6 +37,7 @@ import dev.mfp.core.plan.LineDecision;
 import dev.mfp.core.plan.MachineConfig;
 import dev.mfp.core.plan.Plan;
 import dev.mfp.core.plan.PlanExport;
+import dev.mfp.core.plan.PlanHistory;
 import dev.mfp.core.plan.SolverMode;
 import dev.mfp.core.plan.TargetOutput;
 import dev.mfp.core.solver.LineResult;
@@ -49,6 +50,7 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.item.ItemStack;
+import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -199,6 +201,31 @@ public final class PlannerScreen extends Screen {
         rebuild();
     }
 
+    /**
+     * Take back the last edit (M15), and say so when there is nothing to take back.
+     *
+     * <p>The notice matters more here than anywhere else on this screen: a button that appears to
+     * do nothing is how a user concludes undo is broken, and "nothing to undo" is a different
+     * message from "that did not work".
+     */
+    private void undo() {
+        if (ClientPlanner.undo() == null) {
+            notice("Nothing to undo", false);
+            return;
+        }
+        this.plan = ClientPlanner.current();
+        rebuild();
+    }
+
+    private void redo() {
+        if (ClientPlanner.redo() == null) {
+            notice("Nothing to redo", false);
+            return;
+        }
+        this.plan = ClientPlanner.current();
+        rebuild();
+    }
+
     /** Rebuilds every widget. Called on open, on resize, and whenever anything changes. */
     private void rebuild() {
         widgets.clear();
@@ -224,6 +251,28 @@ public final class PlannerScreen extends Screen {
         refresh.bounds(rightX, cursorY, refresh.preferredWidth(), 14);
         widgets.add(refresh);
 
+        // Undo and redo beside Refresh, because they are the same kind of thing — a button that
+        // re-solves — and because a keystroke nobody can see is a feature only the person who wrote
+        // it uses. The keystroke is Ctrl+Z, handled by the screen (keyPressed below).
+        PlanHistory history = plan.history();
+        TextButton undo = new TextButton("Undo", this::undo);
+        undo.enabled(history.canUndo());
+        undo.tooltip(history.canUndo()
+                ? "Take back the last edit (Ctrl+Z). " + history.undoDepth()
+                        + " step(s) back available, and Ctrl+Y puts them forward again."
+                : "Nothing to take back yet. Every edit that changes the plan can be undone with "
+                        + "Ctrl+Z; changing how it is displayed is not an edit.");
+        undo.bounds(refresh.x() + refresh.width() + GAP, cursorY, undo.preferredWidth(), 14);
+        widgets.add(undo);
+
+        TextButton redo = new TextButton("Redo", this::redo);
+        redo.enabled(history.canRedo());
+        redo.tooltip(history.canRedo()
+                ? "Put back the last undone edit (Ctrl+Y). " + history.redoDepth() + " available."
+                : "Nothing undone to put back (Ctrl+Y).");
+        redo.bounds(undo.x() + undo.width() + GAP, cursorY, redo.preferredWidth(), 14);
+        widgets.add(redo);
+
         TextButton scaleToggle = new TextButton("Rate: " + timescale.suffix(), () -> {
             timescale = timescale.next();
             rebuild();
@@ -234,7 +283,7 @@ public final class PlannerScreen extends Screen {
         });
         scaleToggle.tooltip("Per second, per minute or stacks per minute. A display multiplication "
                 + "only - everything MFP stores is per second. Right-click to go back.");
-        scaleToggle.bounds(refresh.x() + refresh.width() + GAP, cursorY, scaleToggle.preferredWidth(), 14);
+        scaleToggle.bounds(redo.x() + redo.width() + GAP, cursorY, scaleToggle.preferredWidth(), 14);
         widgets.add(scaleToggle);
 
         TextButton perMachineToggle = new TextButton(perMachine ? "Per machine" : "Per line", () -> {
@@ -1701,6 +1750,23 @@ public final class PlannerScreen extends Screen {
 
     @Override
     public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        // Before the widgets, deliberately. Undo is a gesture about the whole plan rather than
+        // about whatever happens to hold focus, and a rate box that swallowed Ctrl+Z while the user
+        // was mid-edit would make the keystroke work everywhere except where they were looking.
+        if (plan != null && Screen.hasControlDown()) {
+            if (keyCode == GLFW.GLFW_KEY_Z && Screen.hasShiftDown()) {
+                redo();
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_Z) {
+                undo();
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_Y) {
+                redo();
+                return true;
+            }
+        }
         for (MfpWidget widget : List.copyOf(widgets)) {
             if (widget.keyPressed(keyCode, scanCode, modifiers)) {
                 return true;

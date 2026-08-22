@@ -77,6 +77,9 @@ public final class RenameScreen extends ModalScreen {
     /** Back to the planner, which re-solves nothing: a name changes no number. */
     @Override
     protected void back() {
+        // But it is still an edit, and the only one that does not end in a solve — so it is filed
+        // here, or the next real edit would carry it and one undo would take back both (M15).
+        ClientPlanner.recordEdit();
         ClientPlanner.saveAll(dev.mfp.client.MfpClient.worldName());
         super.back();
     }
