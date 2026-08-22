@@ -72,6 +72,9 @@ public final class MfpCommand {
         // silently reports the wrong number for it.
         MfpModifiersCommand.register(root);
 
+        // Where a multiblock's structure is declared, read without a client (M16).
+        MfpStructureCommand.register(root);
+
         // Planning, explanation and the recipe picker's ranked list.
         MfpPlanCommand.register(root);
 
